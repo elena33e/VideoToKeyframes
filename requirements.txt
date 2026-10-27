@@ -1,0 +1,9 @@
+# Library for Shot Boundary Detection (SBD)
+scenedetect[opencv]>=0.6.2
+
+# Library for Keyframe Extraction (Clustering & Anti-blur)
+katna>=0.8.0
+
+# Computer Vision & Math primitives
+opencv-python>=4.5.0
+numpy>=1.20.0

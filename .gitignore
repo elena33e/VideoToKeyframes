@@ -1,0 +1,22 @@
+# Mediul virtual Python
+/.venv/
+
+# Fișiere Python generate
+__pycache__/
+*.py[cod]
+
+# Configurarea locală PyCharm
+/.idea/
+
+# Rezultatele extragerilor și rapoartele rulărilor
+/output/
+
+# Fragmente temporare create de Katna
+/clipped/
+
+# Videoclipurile locale de test
+/test_videos/
+
+# Fișiere generate de Windows
+Thumbs.db
+Desktop.ini
