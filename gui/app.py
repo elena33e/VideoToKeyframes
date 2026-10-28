@@ -1,20 +1,26 @@
+import logging
 import math
 import os
-from pathlib import Path
-from queue import Empty, Queue
 import threading
 import tkinter as tk
+from contextlib import ExitStack
+from pathlib import Path
+from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
 
-from main import PipelineError, VideoProcessingPipeline
-from scene_detector import PySceneDetectorService
 from keyframe_extractor import KatnaKeyframeExtractorService
-from performance_monitor import PerformanceMonitor
+from pipeline import PipelineError, VideoProcessingPipeline
+from scene_detector import PySceneDetectorService
+
+
+logger = logging.getLogger(__name__)
 
 
 class VideoPipelineGUI:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, monitor_factory=None):
         self.root = root
+        self.monitor_factory = monitor_factory
         root.title("Video to Keyframes")
         root.geometry("800x560")
         root.minsize(740, 520)
@@ -272,53 +278,65 @@ class VideoPipelineGUI:
         ).start()
 
     def _run_worker(
-        self, video, output, limit, threshold, workers,
-        seconds_per_keyframe,
+            self, video, output, limit, threshold, workers,
+            seconds_per_keyframe,
     ):
         monitor = None
+        result = None
 
         try:
-
-
             pipeline = VideoProcessingPipeline(
                 PySceneDetectorService(threshold=threshold),
                 KatnaKeyframeExtractorService(max_workers=workers),
             )
 
-            monitor = PerformanceMonitor()
+            with ExitStack() as stack:
+                if self.monitor_factory is not None:
+                    try:
+                        monitor = stack.enter_context(
+                            self.monitor_factory()
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Monitorizarea performanței nu a putut fi pornită. "
+                            "Procesarea continuă fără diagnostic.",
+                            exc_info=True,
+                        )
 
-            with monitor:
-                result = pipeline.run(
-                    input_video=video,
-                    base_output_dir=output,
-                    max_total_keyframes=limit,
-                    seconds_per_keyframe=seconds_per_keyframe,
-                    cancel_event=self.cancel_event,
-                    progress_callback=lambda text, current, total:
-                    self.events.put(
-                        ("progress", (text, current, total))
-                    ),
-                )
-
-        except PipelineError as exc:
-            result = exc.result
+                try:
+                    result = pipeline.run(
+                        input_video=video,
+                        base_output_dir=output,
+                        max_total_keyframes=limit,
+                        seconds_per_keyframe=seconds_per_keyframe,
+                        cancel_event=self.cancel_event,
+                        progress_callback=lambda text, current, total:
+                        self.events.put(
+                            ("progress", (text, current, total))
+                        ),
+                    )
+                except PipelineError as exc:
+                    result = exc.result
 
         except Exception as exc:
-            self.events.put(("error", str(exc)))
-            return
+            if result is None:
+                self.events.put(("error", str(exc)))
+                return
+
+            logger.warning(
+                "Finalizarea monitorizării performanței a eșuat.",
+                exc_info=True,
+            )
 
         if monitor is not None:
             try:
-                monitor.report["settings"] = result.get(
-                    "settings", {}
-                )
+                monitor.report["settings"] = result.get("settings", {})
                 monitor.report["input_video"] = str(video)
                 monitor.save(result["output_dir"])
-
-            except OSError as exc:
-                result["message"] += (
-                    " Raportul de performanță nu a putut fi salvat: "
-                    f"{exc}"
+            except Exception:
+                logger.warning(
+                    "Raportul de performanță nu a putut fi salvat.",
+                    exc_info=True,
                 )
 
         self.events.put(("finished", result))
@@ -458,11 +476,7 @@ class VideoPipelineGUI:
     def _preview(self):
         if not self.last_result:
             return
-        try:
-            from PIL import Image, ImageTk
-        except ImportError:
-            messagebox.showerror("Previzualizare", "Instalează biblioteca Pillow.", parent=self.root)
-            return
+
         base = Path(self.last_result["output_dir"])
         items = [
             (scene, base / name)
@@ -520,9 +534,9 @@ class VideoPipelineGUI:
             self.root.destroy()
 
 
-def launch_gui():
+def launch_gui(monitor_factory=None):
     root = tk.Tk()
-    VideoPipelineGUI(root)
+    VideoPipelineGUI(root, monitor_factory=monitor_factory)
     root.mainloop()
 
 

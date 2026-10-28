@@ -10,11 +10,11 @@ from Katna.image_selector import ImageSelector
 
 from keyframe_extractor import KatnaKeyframeExtractorService
 from scene_detector import PySceneDetectorService
-
+from typing import Any
 
 class PerformanceMonitor:
     def __init__(self):
-        self.report = {
+        self.report: dict[str, Any] = {
             "measurement": "wall_time_in_pipeline_worker",
             "detection_seconds": 0.0,
             "pool_creations": 0,
@@ -50,7 +50,8 @@ class PerformanceMonitor:
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        sys.setprofile(None)
+        if sys.getprofile() == self._observe:
+            sys.setprofile(None)
 
         self.report["pipeline_seconds"] = (
             perf_counter() - self._started

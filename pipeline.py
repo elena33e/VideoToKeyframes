@@ -11,7 +11,8 @@ from interfaces import (
     ISceneDetector,
     ProgressCallback,
 )
-
+# Scenele mai scurte decât acest prag sunt comasate cu o scenă vecină
+MIN_SCENE_DURATION_SECONDS = 0.5
 
 class PipelineError(RuntimeError):
     def __init__(self, message: str, result: dict):
@@ -74,8 +75,11 @@ class VideoProcessingPipeline:
         )
 
     @staticmethod
-    def _merge_short_scenes(scenes, min_duration=0.5):
-        """Unește fragmentele foarte scurte cu o scenă vecină."""
+    def _merge_short_scenes(
+            scenes,
+            min_duration=MIN_SCENE_DURATION_SECONDS,
+    ):
+        """Unește fragmentele foarte scurte cu o scenă vecină"""
         merged = []
 
         for scene in sorted(
@@ -108,7 +112,6 @@ class VideoProcessingPipeline:
 
         return merged
 
-    @classmethod
     @classmethod
     def _allocate_frames(
             cls, scenes, seconds_per_keyframe, max_total_keyframes=None
@@ -164,6 +167,18 @@ class VideoProcessingPipeline:
 
         return list(zip(ordered, counts))
 
+    @staticmethod
+    def _save_manifest(result: dict) -> None:
+        """Salvează raportul fără a suprascrie direct versiunea anterioară."""
+        path = Path(result["manifest"])
+        temporary = path.with_suffix(".json.tmp")
+
+        temporary.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
     def run(
             self,
             input_video: Path,
@@ -218,7 +233,7 @@ class VideoProcessingPipeline:
             "settings": {
                 "allocation": "duration_density",
                 "seconds_per_keyframe": seconds_per_keyframe,
-                "min_scene_duration_seconds": 0.5,
+                "min_scene_duration_seconds": MIN_SCENE_DURATION_SECONDS,
                 "max_total_keyframes": max_total_keyframes,
                 "threshold": getattr(
                     self.scene_detector, "threshold", None
@@ -252,6 +267,7 @@ class VideoProcessingPipeline:
         failure = None
 
         try:
+            self._save_manifest(result)
             scenes = []
 
             if not cancel.is_set():
@@ -270,7 +286,8 @@ class VideoProcessingPipeline:
 
                 result["detected_scenes"] = len(scenes)
                 scenes = self._merge_short_scenes(
-                    scenes, min_duration=0.5
+                    scenes,
+                    min_duration=MIN_SCENE_DURATION_SECONDS,
                 )
 
             allocation = self._allocate_frames(
@@ -310,6 +327,8 @@ class VideoProcessingPipeline:
             for scene, requested in allocation:
                 records[scene.index]["requested_frames"] = requested
 
+            self._save_manifest(result)
+
             for scene, requested in allocation:
                 if cancel.is_set():
                     break
@@ -319,6 +338,8 @@ class VideoProcessingPipeline:
 
                 current = result["processed_scenes"]
                 total = result["selected_scenes"]
+
+                self._save_manifest(result)
 
                 try:
                     notify(
@@ -396,6 +417,7 @@ class VideoProcessingPipeline:
                     })
 
                 result["processed_scenes"] += 1
+                self._save_manifest(result)
 
                 notify(
                     f"Scene procesate: "
@@ -453,16 +475,7 @@ class VideoProcessingPipeline:
         )
 
         try:
-            temporary = run_dir / "manifest.json.tmp"
-            temporary.write_text(
-                json.dumps(
-                    result,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            temporary.replace(run_dir / "manifest.json")
+            self._save_manifest(result)
 
         except OSError as exc:
             failure = exc

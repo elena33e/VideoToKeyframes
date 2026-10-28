@@ -122,7 +122,7 @@ class KatnaKeyframeExtractorService(IKeyframeExtractor):
 
                 names = [path.name for path in writer.paths]
 
-                # Publicăm imaginile după verificarea extragerii.
+                # Publicăm imaginile după verificarea extragerii
                 images_dir.rename(output_dir)
 
                 return [

@@ -1,9 +1,10 @@
-# Library for Shot Boundary Detection (SBD)
-scenedetect[opencv]>=0.6.2
+--only-binary katna
 
-# Library for Keyframe Extraction (Clustering & Anti-blur)
-katna>=0.8.0
+# Wheelul local PySceneDetect, construit din sursa oficială, permite folosirea exclusivă a OpenCV contrib împreună cu Katna
+# La actualizarea PySceneDetect, wheelul din wheels/ trebuie reconstruit și retestat!!!
+./wheels/scenedetect_core-0.7.2-py3-none-any.whl
 
-# Computer Vision & Math primitives
-opencv-python>=4.5.0
-numpy>=1.20.0
+katna==0.9.2
+opencv-contrib-python==5.0.0.93
+numpy==2.4.6
+pillow==13.0.0

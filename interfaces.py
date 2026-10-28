@@ -25,25 +25,16 @@ class Scene:
 class ISceneDetector(ABC):
     @abstractmethod
     def detect_scenes(self, video_path: Path) -> List[Scene]:
-        """Returnează intervalele scenelor, fără exportul clipurilor."""
+        """Returnează intervalele scenelor"""
         raise NotImplementedError
 
     @abstractmethod
     def export_scene(
         self, video_path: Path, scene: Scene, output_dir: Path
     ) -> Path:
-        """Exportă o singură scenă într-un director nou."""
+        """Exportă o singură scenă într-un director nou"""
         raise NotImplementedError
 
-    def detect_and_split(self, video_path: Path, output_dir: Path) -> List[Path]:
-        """Compatibilitate cu apelurile vechi; exportă toate scenele."""
-        scenes = self.detect_scenes(video_path)
-        if len(scenes) == 1:
-            return [Path(video_path)]
-        return [
-            self.export_scene(video_path, scene, output_dir / f"scene_{scene.index:04d}")
-            for scene in scenes
-        ]
 
 
 class IKeyframeExtractor(ABC):

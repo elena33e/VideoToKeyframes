@@ -1,5 +1,6 @@
 # Mediul virtual Python
 /.venv/
+/.venv-test/
 
 # Fișiere Python generate
 __pycache__/
