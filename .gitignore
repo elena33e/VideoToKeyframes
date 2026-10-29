@@ -21,3 +21,5 @@ __pycache__/
 # Fișiere generate de Windows
 Thumbs.db
 Desktop.ini
+
+.env

@@ -9,9 +9,9 @@ from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
-from keyframe_extractor import KatnaKeyframeExtractorService
-from pipeline import PipelineError, VideoProcessingPipeline
-from scene_detector import PySceneDetectorService
+from extraction.keyframe_extractor import KatnaKeyframeExtractorService
+from extraction.pipeline import PipelineError, VideoProcessingPipeline
+from extraction.scene_detector import PySceneDetectorService
 
 
 logger = logging.getLogger(__name__)

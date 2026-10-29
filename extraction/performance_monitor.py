@@ -8,8 +8,8 @@ from time import perf_counter
 
 from Katna.image_selector import ImageSelector
 
-from keyframe_extractor import KatnaKeyframeExtractorService
-from scene_detector import PySceneDetectorService
+from extraction.keyframe_extractor import KatnaKeyframeExtractorService
+from extraction.scene_detector import PySceneDetectorService
 from typing import Any
 
 class PerformanceMonitor:

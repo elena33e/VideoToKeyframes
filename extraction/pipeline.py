@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from interfaces import (
+from extraction.interfaces import (
     IKeyframeExtractor,
     ISceneDetector,
     ProgressCallback,

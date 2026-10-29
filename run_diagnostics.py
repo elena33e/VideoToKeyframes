@@ -1,5 +1,5 @@
 from gui.app import launch_gui
-from performance_monitor import PerformanceMonitor
+from extraction.performance_monitor import PerformanceMonitor
 
 
 if __name__ == "__main__":
