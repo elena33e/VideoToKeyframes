@@ -15,9 +15,55 @@ from interpretation.describe import DescriptionConfig, OpenRouterImageDescriber
 from interpretation.models import OntologyCatalog
 from interpretation.observations import FrameObservation
 from interpretation.ontology import load_ontology
+from interpretation.context import build_ontology_context
+from interpretation.raw_context import (
+    RawOntologyContext,
+    load_raw_ontology_context,
+)
 
 
 DEFAULT_FREE_MODEL = "nvidia/nemotron-3.5-super-vl:free"
+
+GUI_CONTEXT_PREVIEW_LIMIT = 6_000
+
+
+def format_context_preview(text: str) -> str:
+    if len(text) <= GUI_CONTEXT_PREVIEW_LIMIT:
+        return text
+
+    return (
+        text[:GUI_CONTEXT_PREVIEW_LIMIT]
+        + "\n\n[Previzualizare limitată. Contextul complet este "
+        + "trimis modelului și inclus în JSON-ul salvat. "
+        + f"Total: {len(text):,} de caractere.]"
+    )
+
+
+def format_json_preview(result: FrameObservation) -> str:
+    data = dict(result.model_dump())
+    parameters = dict(data.get("parameters") or {})
+    context = parameters.get("ontology_context")
+
+    if isinstance(context, dict):
+        context = dict(context)
+        text = context.pop("text", None)
+
+        if isinstance(text, str):
+            context["preview_note"] = (
+                f"Textul ontologiei ({len(text):,} de caractere) "
+                "este omis doar din previzualizare. "
+                "JSON-ul salvat conține textul complet."
+            )
+
+        parameters["ontology_context"] = context
+
+    data["parameters"] = parameters
+
+    return json.dumps(
+        data,
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def format_observation(result: FrameObservation) -> str:
@@ -81,6 +127,9 @@ class InterpretationGUI:
         self.ontology_path: Path | None = None
         self.result: FrameObservation | None = None
         self.catalog: OntologyCatalog | None = None
+        self.raw_ontology_context: RawOntologyContext | None = None
+        self.context_cache = {}
+        self.use_ontology_var = tk.BooleanVar(value=True)
         self.preview_photo = None
 
         self.model_var = tk.StringVar(value=model or DEFAULT_FREE_MODEL)
@@ -158,8 +207,21 @@ class InterpretationGUI:
 
         result_tabs = ttk.Notebook(description_tab)
         result_tabs.grid(row=0, column=1, sticky="nsew")
-        self.description_text = self._add_text_tab(result_tabs, "Observație")
-        self.json_text = self._add_text_tab(result_tabs, "JSON")
+
+        self.description_text = self._add_text_tab(
+            result_tabs,
+            "Observație",
+        )
+
+        self.json_text = self._add_text_tab(
+            result_tabs,
+            "JSON",
+        )
+
+        self.context_text = self._add_text_tab(
+            result_tabs,
+            "Contextul ultimei cereri",
+        )
 
         ontology_tab = ttk.Frame(tabs, padding=10)
         tabs.add(ontology_tab, text="Inspectarea ontologiei")
@@ -168,8 +230,11 @@ class InterpretationGUI:
         ttk.Label(
             ontology_tab,
             text=(
-                "Aici verifici catalogul ontologiei. În această versiune, "
-                "descrierea imaginii nu folosește încă ontologia pentru mapare."
+                "În această variantă experimentală, fișierul "
+                "ontologiei este trimis integral ca text, împreună "
+                "cu imaginea. Nu se extrag concepte înaintea "
+                "apelului și nu se aplică selecția din tabel. "
+                "Bifa de ghidare permite comparația fără ontologie."
             ),
             wraplength=900,
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -192,7 +257,10 @@ class InterpretationGUI:
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
         self.concepts_table = ttk.Treeview(
-            table_frame, columns=("label", "kind", "iri"), show="headings"
+            table_frame,
+            columns=("label", "kind", "iri"),
+            show="headings",
+            selectmode="extended",
         )
         for column, title, width in (
             ("label", "Denumire", 220),
@@ -202,6 +270,12 @@ class InterpretationGUI:
             self.concepts_table.heading(column, text=title)
             self.concepts_table.column(column, width=width, minwidth=80)
         self.concepts_table.grid(row=0, column=0, sticky="nsew")
+        self.concepts_table.bind(
+            "<Escape>",
+            lambda event: self.concepts_table.selection_remove(
+                self.concepts_table.selection()
+            ),
+        )
         scrollbar = ttk.Scrollbar(
             table_frame, orient="vertical", command=self.concepts_table.yview
         )
@@ -218,6 +292,13 @@ class InterpretationGUI:
             actions, text="Descrie imaginea", command=self._describe
         )
         self.describe_button.pack(side="left")
+        self.use_ontology_checkbox = ttk.Checkbutton(
+            actions,
+            text="Ghidează descrierea cu ontologia",
+            variable=self.use_ontology_var,
+            command=self._update_controls,
+        )
+        self.use_ontology_checkbox.pack(side="left", padx=8)
         self.save_result_button = ttk.Button(
             actions, text="Salvează observația JSON…", command=self._save_result
         )
@@ -246,20 +327,43 @@ class InterpretationGUI:
 
     def _update_controls(self):
         state = "disabled" if self.running else "normal"
+
         for control in (
-            self.model_entry, self.choose_image_button, self.choose_ontology_button
+                self.model_entry,
+                self.choose_image_button,
+                self.choose_ontology_button,
+                self.use_ontology_checkbox,
         ):
             control.configure(state=state)
+
+        can_describe = (
+                not self.running
+                and self.image_path is not None
+                and bool(self.api_key.strip())
+                and (
+                        not self.use_ontology_var.get()
+                        or self.raw_ontology_context is not None
+                )
+        )
+
         self.describe_button.configure(
-            state="normal" if (
-                not self.running and self.image_path and self.api_key.strip()
-            ) else "disabled"
+            state="normal" if can_describe else "disabled"
         )
+
         self.save_result_button.configure(
-            state="normal" if not self.running and self.result else "disabled"
+            state=(
+                "normal"
+                if not self.running and self.result is not None
+                else "disabled"
+            )
         )
+
         self.save_catalog_button.configure(
-            state="normal" if not self.running and self.catalog else "disabled"
+            state=(
+                "normal"
+                if not self.running and self.catalog is not None
+                else "disabled"
+            )
         )
 
     def _choose_image(self):
@@ -288,47 +392,118 @@ class InterpretationGUI:
         self.result = None
         self._set_text(self.description_text, "")
         self._set_text(self.json_text, "")
+        self._set_text(self.context_text, "")
+
         self.status_var.set("Imagine pregătită pentru descriere.")
         self._update_controls()
 
     def _choose_ontology(self):
         filename = filedialog.askopenfilename(
             parent=self.root,
-            title="Alege ontologia",
+            title="Alege ontologia originală",
             filetypes=[
-                ("Ontologii RDF", "*.owl *.rdf *.xml *.ttl *.n3 *.nt *.jsonld *.json-ld"),
+                (
+                    "Ontologii text",
+                    "*.owl *.rdf *.xml *.ttl *.n3 *.nt "
+                    "*.nq *.trig *.jsonld *.json-ld",
+                ),
                 ("Toate fișierele", "*.*"),
             ],
         )
-        if filename:
-            path = Path(filename).resolve()
-            self._start_job(
-                "ontology", lambda: (path, load_ontology(path)),
-                "Se încarcă ontologia…",
-            )
+
+        if not filename:
+            return
+
+        path = Path(filename).resolve()
+
+        self._start_job(
+            "ontology",
+            lambda: (
+                path,
+                load_raw_ontology_context(path),
+            ),
+            "Se citește fișierul original al ontologiei…",
+        )
 
     def _describe(self):
         if self.running or self.image_path is None:
             return
+
         try:
             model = self.model_var.get().strip()
+
             if not model.endswith(":free"):
                 raise ValueError(
-                    "Această interfață de test acceptă doar modele cu sufixul :free."
+                    "Această interfață de test acceptă doar "
+                    "modele cu sufixul :free."
                 )
-            config = DescriptionConfig(api_key=self.api_key, model=model)
+
+            ontology_context = None
+
+            if self.use_ontology_var.get():
+                ontology_context = self.raw_ontology_context
+
+                if ontology_context is None:
+                    raise ValueError(
+                        "Încarcă ontologia originală sau "
+                        "debifează ghidarea ontologică."
+                    )
+
+
+            config = DescriptionConfig(
+                api_key=self.api_key,
+                model=model,
+                language="English",
+                domain_context = "Traditional egg decorating (încondeierea ouălor)",
+            )
+
             image_path = self.image_path
             describer = OpenRouterImageDescriber(config)
+
         except ValueError as exc:
-            messagebox.showerror("Configurare invalidă", str(exc), parent=self.root)
+            messagebox.showerror(
+                "Configurare invalidă",
+                str(exc),
+                parent=self.root,
+            )
             return
+
         self.result = None
+
         self._set_text(self.description_text, "")
         self._set_text(self.json_text, "")
+
+        self._set_text(
+            self.context_text,
+            (
+                format_context_preview(ontology_context.text)
+                if ontology_context is not None
+                else (
+                    "Ghidare dezactivată. Cererea nu conține "
+                    "context ontologic."
+                )
+            ),
+        )
+
+        if ontology_context is not None:
+            status = (
+                "Se descrie imaginea cu fișierul original "
+                "al ontologiei: "
+                f"{len(ontology_context.text):,} de caractere…"
+            )
+        else:
+            status = (
+                "Se descrie imaginea fără context ontologic…"
+            )
+
         self._start_job(
             "description",
-            lambda: describer.describe(image_path, frame_id=image_path.name),
-            "Se descrie imaginea. Așteaptă răspunsul modelului…",
+            lambda: describer.describe(
+                image_path,
+                frame_id=image_path.name,
+                ontology_context=ontology_context,
+            ),
+            status,
         )
 
     def _start_job(self, kind: str, operation: Callable, status: str):
@@ -361,15 +536,44 @@ class InterpretationGUI:
                 if kind == "description":
                     self.result = value
                     self._set_text(self.description_text, format_observation(value))
-                    self._set_text(self.json_text, value.model_dump_json(indent=2))
+                    self._set_text(
+                        self.json_text,
+                        format_json_preview(value),
+                    )
                     self.status_var.set(
                         "Descriere finalizată. Poți inspecta și salva observația."
                     )
                 elif kind == "ontology":
-                    self.ontology_path, self.catalog = value
+                    (
+                        self.ontology_path,
+                        self.raw_ontology_context,
+                    ) = value
+
+                    self.catalog = None
+                    self.context_cache.clear()
                     self.ontology_var.set(str(self.ontology_path))
-                    self._show_catalog()
-                    self.status_var.set("Ontologie încărcată.")
+
+                    for item in self.concepts_table.get_children():
+                        self.concepts_table.delete(item)
+
+                    character_count = len(
+                        self.raw_ontology_context.text
+                    )
+
+                    self.catalog_summary.configure(
+                        text=(
+                            "Este încărcat fișierul original: "
+                            f"{character_count:,} de caractere. "
+                            "Nu se construiește catalogul de concepte. "
+                            "Fișierele referite prin owl:imports "
+                            "nu sunt încărcate automat."
+                        )
+                    )
+
+                    self.status_var.set(
+                        "Ontologia originală este pregătită "
+                        "pentru descriere."
+                    )
                 else:
                     self.status_var.set("Operația a eșuat. Consultă mesajul de eroare.")
                     messagebox.showerror("Procesare nereușită", value, parent=self.root)

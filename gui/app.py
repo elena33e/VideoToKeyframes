@@ -330,9 +330,11 @@ class VideoPipelineGUI:
 
         if monitor is not None:
             try:
-                monitor.report["settings"] = result.get("settings", {})
+                monitor.report["settings"] = result.settings.model_dump(
+                    mode="json"
+                )
                 monitor.report["input_video"] = str(video)
-                monitor.save(result["output_dir"])
+                monitor.save(result.output_dir)
             except Exception:
                 logger.warning(
                     "Raportul de performanță nu a putut fi salvat.",
@@ -404,31 +406,29 @@ class VideoPipelineGUI:
         self._set_running(False)
         self.progress.stop()
 
-        selected = result["selected_scenes"]
-        processed = result["processed_scenes"]
+        selected = result.selected_scenes
+        processed = result.processed_scenes
 
         self.progress.configure(
             mode="determinate",
-            value=(
-                100 * processed / selected
-                if selected else 0
-            ),
+            value=100 * processed / selected if selected else 0,
         )
 
         self.status_var.set(
-            f"{result['message']} "
-            f"Cadre salvate: {result['total_keyframes']}. "
+            f"{result.message} "
+            f"Cadre salvate: {result.total_keyframes}. "
             f"Scene cu cadre: "
-            f"{result['covered_scenes']} / {result['total_scenes']}."
+            f"{result.covered_scenes} / {result.total_scenes}."
         )
 
         self.open_button.configure(state="normal")
 
-        has_images = any(
-            scene["images"] for scene in result["scenes"]
-        )
         self.preview_button.configure(
-            state="normal" if has_images else "disabled"
+            state=(
+                "normal"
+                if any(scene.frames for scene in result.scenes)
+                else "disabled"
+            )
         )
 
         if self.closing:
@@ -436,21 +436,21 @@ class VideoPipelineGUI:
             return
 
         details = (
-            f"{result['message']}\n"
+            f"{result.message}\n"
             f"Scene procesate: {processed} / {selected}\n"
             f"Scene cu cadre: "
-            f"{result['covered_scenes']} / {result['total_scenes']}\n"
-            f"Scene omise prin limită: {result['omitted_scenes']}\n"
-            f"Cadre salvate: {result['total_keyframes']}\n"
-            f"Cadre solicitate prin plan: {result['target_keyframes']}\n"
-            f"Rezultate: {result['output_dir']}\n"
-            f"Raport: {result['manifest']}"
+            f"{result.covered_scenes} / {result.total_scenes}\n"
+            f"Scene omise prin limită: {result.omitted_scenes}\n"
+            f"Cadre salvate: {result.total_keyframes}\n"
+            f"Cadre solicitate prin plan: {result.target_keyframes}\n"
+            f"Rezultate: {result.output_dir}\n"
+            f"Raport: {result.manifest}"
         )
 
-        if result["errors"]:
+        if result.errors:
             details += "\n\n" + "\n".join(
-                error["message"]
-                for error in result["errors"][:3]
+                error.message
+                for error in result.errors[:3]
             )
 
         display = {
@@ -458,7 +458,7 @@ class VideoPipelineGUI:
             "partial": messagebox.showwarning,
             "cancelled": messagebox.showinfo,
             "failed": messagebox.showerror,
-        }[result["status"]]
+        }[result.status]
 
         display(
             "Rezultatul procesării",
@@ -467,60 +467,105 @@ class VideoPipelineGUI:
         )
 
     def _open_results(self):
-        if self.last_result:
-            try:
-                os.startfile(self.last_result["output_dir"])
-            except OSError as exc:
-                messagebox.showerror("Eroare", str(exc), parent=self.root)
+        if self.last_result is None:
+            return
+
+        try:
+            os.startfile(self.last_result.output_dir)
+        except OSError as exc:
+            messagebox.showerror(
+                "Eroare",
+                str(exc),
+                parent=self.root,
+            )
 
     def _preview(self):
-        if not self.last_result:
+        if self.last_result is None:
             return
 
-        base = Path(self.last_result["output_dir"])
+        base = self.last_result.output_dir
         items = [
-            (scene, base / name)
-            for scene in self.last_result["scenes"] for name in scene["images"]
+            (scene, base / frame.image_path)
+            for scene in self.last_result.scenes
+            for frame in scene.frames
         ]
+
         if not items:
             return
+
         window = tk.Toplevel(self.root)
         window.title("Cadre extrase")
         window.geometry("1000x650")
+
         panel = ttk.Frame(window, padding=10)
         panel.pack(fill="both", expand=True)
-        choices = tk.Listbox(panel, width=33, exportselection=False)
+
+        choices = tk.Listbox(
+            panel,
+            width=33,
+            exportselection=False,
+        )
         choices.pack(side="left", fill="y", padx=(0, 10))
-        scrollbar = ttk.Scrollbar(panel, orient="vertical", command=choices.yview)
+
+        scrollbar = ttk.Scrollbar(
+            panel,
+            orient="vertical",
+            command=choices.yview,
+        )
         scrollbar.pack(side="left", fill="y")
         choices.configure(yscrollcommand=scrollbar.set)
+
         viewer = ttk.Frame(panel)
         viewer.pack(side="left", fill="both", expand=True)
+
         caption = ttk.Label(viewer, wraplength=600)
         caption.pack(pady=8)
+
         picture = ttk.Label(viewer)
         picture.pack(fill="both", expand=True)
+
         for scene, path in items:
-            choices.insert("end", f"Scena {scene['index']}: {path.name}")
+            choices.insert(
+                "end",
+                f"Scena {scene.index}: {path.name}",
+            )
 
         def show_selected(_event=None):
             selected = choices.curselection()
             if not selected:
                 return
+
             scene, path = items[selected[0]]
+
             try:
                 with Image.open(path) as source:
                     image = source.copy()
+
                 image.thumbnail((700, 520))
-                picture.image = ImageTk.PhotoImage(image, master=window)
+
+                picture.image = ImageTk.PhotoImage(
+                    image,
+                    master=window,
+                )
                 picture.configure(image=picture.image)
-                caption.configure(text=(
-                    f"Scena {scene['index']}: {scene['start_seconds']:.2f}–"
-                    f"{scene['end_seconds']:.2f} secunde în videoclipul original.\n"
-                    "Intervalul indică scena; momentul exact al cadrului nu este disponibil."
-                ))
+
+                caption.configure(
+                    text=(
+                        f"Scena {scene.index}: "
+                        f"{scene.start_seconds:.2f}–"
+                        f"{scene.end_seconds:.2f} secunde "
+                        "în videoclipul original.\n"
+                        "Intervalul indică scena; momentul exact "
+                        "al cadrului nu este disponibil."
+                    )
+                )
+
             except (OSError, ValueError) as exc:
-                messagebox.showerror("Imagine indisponibilă", str(exc), parent=window)
+                messagebox.showerror(
+                    "Imagine indisponibilă",
+                    str(exc),
+                    parent=window,
+                )
 
         choices.bind("<<ListboxSelect>>", show_selected)
         choices.selection_set(0)
