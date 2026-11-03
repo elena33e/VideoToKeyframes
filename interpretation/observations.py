@@ -2,6 +2,11 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from urllib.parse import quote
+from uuid import uuid4
+
+from .config import OBSERVATION_BASE_IRI
+from .jsonld_context import build_observation_context
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -88,7 +93,10 @@ class FrameObservation(ObservationModel):
     Identificatorii și metadatele sunt adăugate de aplicație,
     nu generate de model.
     """
-
+    analysis_id: str = Field(
+        default_factory=lambda: uuid4().hex,
+        pattern=r"^[0-9a-f]{32}$",
+    )
     schema_version: str
     frame_id: NonEmptyText
     scene_index: int | None
@@ -103,3 +111,62 @@ class FrameObservation(ObservationModel):
     parameters: dict[str, Any]
     usage: dict[str, Any]
     observation: ImageObservation
+
+    def to_jsonld(self) -> dict[str, Any]:
+        """Construiește documentul JSON-LD fără să modifice observația."""
+        base_iri = f"{OBSERVATION_BASE_IRI}{self.analysis_id}/"
+        context = build_observation_context(base_iri=base_iri)
+
+        # Lucrăm pe reprezentarea serializată, nu pe obiectul original.
+        data = self.model_dump(mode="json")
+
+        data["@context"] = context
+        data["id"] = base_iri
+        data["type"] = "FrameObservation"
+
+        observation = data["observation"]
+        observation["id"] = base_iri + "image"
+        observation["type"] = "ImageObservation"
+
+        # Asociem ID-urile locale cu identificatori absoluți.
+        entity_iris = {
+            entity["id"]: (
+                base_iri
+                + "entities/"
+                + quote(entity["id"], safe="")
+            )
+            for entity in observation["entities"]
+        }
+
+        for entity in observation["entities"]:
+            entity["id"] = entity_iris[entity["id"]]
+            entity["type"] = "EntityObservation"
+
+        for index, relation in enumerate(
+            observation["relations"],
+            start=1,
+        ):
+            relation["id"] = f"{base_iri}relations/{index}"
+            relation["type"] = "RelationObservation"
+
+            relation["subject_id"] = entity_iris[
+                relation["subject_id"]
+            ]
+            relation["object_id"] = entity_iris[
+                relation["object_id"]
+            ]
+
+        for index, action in enumerate(
+            observation["actions"],
+            start=1,
+        ):
+            action["id"] = f"{base_iri}actions/{index}"
+            action["type"] = "ActionObservation"
+
+            action["entity_ids"] = [
+                entity_iris[entity_id]
+                for entity_id in action["entity_ids"]
+            ]
+
+        return data
+

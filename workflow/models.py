@@ -80,8 +80,22 @@ class KeyframeState(WorkflowModel):
         return self
 
 
+class ImportedFrame(WorkflowModel):
+    frame_id: NonEmptyText
+    image_path: Path
+    scene_index: None = None
+
+    @model_validator(mode="after")
+    def validate_path(self) -> Self:
+        if not self.image_path.is_absolute():
+            raise ValueError(
+                "Imaginea importată trebuie să aibă o cale absolută."
+            )
+        return self
+
+
 class WorkflowSession(WorkflowModel):
-    schema_version: Literal["2.0"] = "2.0"
+    schema_version: Literal["2.0", "2.1"] = "2.1"
 
     session_id: NonEmptyText = Field(
         default_factory=lambda: uuid4().hex
@@ -90,14 +104,18 @@ class WorkflowSession(WorkflowModel):
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
-    extraction: ExtractionResult
+    extraction: ExtractionResult | None = None
+    imported_frames: tuple[ImportedFrame, ...] = ()
     frames: tuple[KeyframeState, ...] = ()
 
     # Independentă de descrierea imaginilor.
     ontology_path: Path | None = None
 
     @property
-    def keyframes(self) -> tuple[ExtractedFrame, ...]:
+    def keyframes(self) -> tuple[ExtractedFrame | ImportedFrame, ...]:
+        if self.extraction is None:
+            return self.imported_frames
+
         return tuple(
             frame
             for scene in self.extraction.scenes
@@ -107,34 +125,56 @@ class WorkflowSession(WorkflowModel):
 
     @model_validator(mode="after")
     def validate_session(self) -> Self:
-        if self.extraction.status == "running":
-            raise ValueError(
-                "Așteaptă încheierea extragerii."
-            )
+        if self.extraction is None:
+            if not self.imported_frames:
+                raise ValueError(
+                    "Sesiunea trebuie să conțină o extragere "
+                    "sau imagini importate."
+                )
+        else:
+            if self.imported_frames:
+                raise ValueError(
+                    "Sesiunea nu poate combina o extragere "
+                    "cu imagini importate."
+                )
 
-        scene_ids = [
-            scene.index
-            for scene in self.extraction.scenes
-        ]
+            if self.extraction.status == "running":
+                raise ValueError(
+                    "Așteaptă încheierea extragerii."
+                )
 
-        if len(scene_ids) != len(set(scene_ids)):
-            raise ValueError(
-                "Rezultatul conține scene duplicate."
-            )
+            scene_ids = [
+                scene.index
+                for scene in self.extraction.scenes
+            ]
+
+            if len(scene_ids) != len(set(scene_ids)):
+                raise ValueError(
+                    "Rezultatul conține scene duplicate."
+                )
 
         keyframes = self.keyframes
-        source_ids = [frame.frame_id for frame in keyframes]
-        paths = [frame.image_path for frame in keyframes]
-        state_ids = [state.frame_id for state in self.frames]
+        source_ids = [
+            frame.frame_id
+            for frame in keyframes
+        ]
+        paths = [
+            frame.image_path
+            for frame in keyframes
+        ]
+        state_ids = [
+            state.frame_id
+            for state in self.frames
+        ]
 
         if len(source_ids) != len(set(source_ids)):
             raise ValueError(
-                "Rezultatul conține ID-uri de cadru duplicate."
+                "Există ID-uri de cadru duplicate."
             )
 
         if len(paths) != len(set(paths)):
             raise ValueError(
-                "Aceeași imagine apare în mai multe scene."
+                "Aceeași imagine apare de mai multe ori."
             )
 
         if len(state_ids) != len(set(state_ids)):
@@ -144,7 +184,7 @@ class WorkflowSession(WorkflowModel):
 
         if set(state_ids) != set(source_ids):
             raise ValueError(
-                "Fiecare cadru extras valid trebuie să aibă exact o stare."
+                "Fiecare imagine trebuie să aibă exact o stare."
             )
 
         by_id = {

@@ -7,12 +7,10 @@ from threading import Event
 from typing import Literal, Protocol
 
 from pydantic import Field
-
-from extraction.models import ExtractedFrame
 from interpretation.observations import FrameObservation
 
 from .models import DescriptionStatus, WorkflowModel, WorkflowSession
-from .service import get_selected_frames
+from .service import get_frame_path, get_selected_frames
 
 
 class FrameDescriber(Protocol):
@@ -71,20 +69,6 @@ def _update_frame(
 
     return WorkflowSession.model_validate(data)
 
-
-def _image_path(
-    session: WorkflowSession,
-    frame: ExtractedFrame,
-) -> Path:
-    base = session.extraction.output_dir.resolve()
-    path = (base / frame.image_path).resolve(strict=True)
-
-    if not path.is_relative_to(base) or not path.is_file():
-        raise ValueError(
-            "Imaginea trebuie să fie un fișier din directorul extragerii."
-        )
-
-    return path
 
 
 def describe_selected(
@@ -164,7 +148,7 @@ def describe_selected(
             return
 
         try:
-            path = _image_path(current, frame)
+            path = get_frame_path(current, frame.frame_id)
 
             if previous.observation is not None and not regenerate:
                 current_hash = hashlib.sha256(

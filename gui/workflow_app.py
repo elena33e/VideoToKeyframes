@@ -20,8 +20,14 @@ from interpretation.describe import DescriptionConfig, OpenRouterImageDescriber
 from interpretation.ontology import load_ontology
 from workflow.description import describe_selected
 from workflow.models import WorkflowSession
-from workflow.service import create_session, set_selection
+from workflow.service import (
+    create_session,
+    create_session_from_images,
+    get_frame_path,
+    set_selection,
+)
 from gui.keyframe_gallery import KeyframeGallery
+from workflow.jsonld import session_to_jsonld
 
 
 DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
@@ -111,7 +117,7 @@ class WorkflowGUI:
         self.regenerate_var = tk.BooleanVar(value=False)
 
         self.status_var = tk.StringVar(
-            value="Încarcă un video pentru a începe."
+            value="Încarcă un video sau imagini pentru a începe."
         )
         self.selection_var = tk.StringVar(value="0 cadre selectate")
 
@@ -169,7 +175,7 @@ class WorkflowGUI:
         ontology_tab = ttk.Frame(self.tabs, padding=12)
 
         for tab, title in (
-            (video_tab, "1. Video și extragere"),
+            (video_tab, "1. Încărcare și extragere"),
             (self.frames_tab, "2. Cadre și descrieri"),
             (ontology_tab, "3. Ontologie"),
         ):
@@ -227,6 +233,18 @@ class WorkflowGUI:
                 "pe care vrei să le descrii."
             ),
         ).grid(row=7, column=0, columnspan=3, sticky="w")
+
+        self._button(
+            video_tab,
+            "Încarcă imagini existente…",
+            self._choose_images,
+        ).grid(
+            row=8,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(20, 0),
+        )
 
         # Galerie și previzualizare.
         tab = self.frames_tab
@@ -302,7 +320,7 @@ class WorkflowGUI:
         json_tab = ttk.Frame(result_tabs)
 
         result_tabs.add(observation_tab, text="Observație")
-        result_tabs.add(json_tab, text="JSON")
+        result_tabs.add(json_tab, text="JSON-LD")
 
         self.observation_widget = self._text(observation_tab)
         self.json_widget = self._text(json_tab)
@@ -380,7 +398,7 @@ class WorkflowGUI:
 
         self.save_button = self._button(
             footer,
-            "Salvează sesiunea JSON…",
+            "Salvează sesiunea JSON-LD…",
             self._save,
         )
         self.save_button.pack(side="left")
@@ -460,6 +478,38 @@ class WorkflowGUI:
         path = filedialog.askdirectory(parent=self.root)
         if path:
             self.output_var.set(path)
+
+    def _choose_images(self):
+        if self.busy:
+            return
+
+        filenames = filedialog.askopenfilenames(
+            parent=self.root,
+            title="Alege imaginile",
+            filetypes=[
+                ("Imagini", "*.jpg *.jpeg *.png *.webp"),
+            ],
+        )
+
+        if not filenames:
+            return
+
+        if self.dirty and not messagebox.askyesno(
+            "Sesiune nouă",
+            "Încărcarea imaginilor va înlocui sesiunea din interfață. "
+            "Modificările nesalvate se vor pierde. Continui?",
+            parent=self.root,
+        ):
+            return
+
+        paths = tuple(filenames)
+
+        self.status_var.set("Se verifică imaginile…")
+        self._launch(
+            "images",
+            lambda cancel, emit: create_session_from_images(paths),
+        )
+
 
     def _launch(self, kind, operation):
         """Execută operația în fundal; comunicarea cu GUI trece prin coadă."""
@@ -650,13 +700,15 @@ class WorkflowGUI:
         items = [
             {
                 "id": frame.frame_id,
-                "path": (
-                        self.session.extraction.output_dir
-                        / frame.image_path
+                "path": get_frame_path(
+                    self.session,
+                    frame.frame_id,
+                    must_exist=False,
                 ),
                 "title": (
-                    f"Scena {frame.scene_index} · "
-                    f"{frame.image_path.name}"
+                    f"Scena {frame.scene_index} · {frame.image_path.name}"
+                    if frame.scene_index is not None
+                    else frame.image_path.name
                 ),
                 "status": STATUS_LABELS[
                     states[frame.frame_id].description_status
@@ -702,10 +754,7 @@ class WorkflowGUI:
 
         if self.preview_id != frame_id:
             try:
-                path = (
-                    self.session.extraction.output_dir
-                    / frame.image_path
-                )
+                path = get_frame_path(self.session, frame_id)
 
                 with Image.open(path) as source:
                     preview = ImageOps.exif_transpose(source).convert(
@@ -734,18 +783,22 @@ class WorkflowGUI:
                     text=f"Imagine indisponibilă: {exc}",
                 )
 
-        scene = next(
-            s for s in self.session.extraction.scenes
-            if s.index == frame.scene_index
-        )
-
-        self.caption.configure(
-            text=(
+        if self.session.extraction is None:
+            caption = (
+                f"{frame.image_path.name} | Imagine încărcată direct."
+            )
+        else:
+            scene = next(
+                s for s in self.session.extraction.scenes
+                if s.index == frame.scene_index
+            )
+            caption = (
                 f"{frame.image_path.name} | Scena {scene.index}: "
                 f"{scene.start_seconds:.2f}–{scene.end_seconds:.2f} s. "
                 "Intervalul este al scenei, nu timestamp-ul cadrului."
             )
-        )
+
+        self.caption.configure(text=caption)
 
         text = (
             f"Stare: {STATUS_LABELS[state.description_status]}\n\n"
@@ -766,10 +819,20 @@ class WorkflowGUI:
         )
 
         self._set_text(self.observation_widget, text)
-        self._set_text(
-            self.json_widget,
-            state.model_dump_json(indent=2),
-        )
+
+        if state.observation is not None:
+            jsonld_text = json.dumps(
+                state.observation.to_jsonld(),
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+        else:
+            jsonld_text = (
+                "Nu există încă o observație de afișat în JSON-LD."
+            )
+
+        self._set_text(self.json_widget, jsonld_text)
 
     def _describe(self):
         if self.busy or self.session is None:
@@ -936,6 +999,23 @@ class WorkflowGUI:
                     )
                 )
 
+            elif job == "images":
+                self.session = WorkflowSession.model_validate({
+                    **result.model_dump(),
+                    "ontology_path": self.ontology_path,
+                })
+
+                self.dirty = True
+                self.regenerate_var.set(False)
+                self._populate_frames()
+                self.tabs.select(self.frames_tab)
+                self.progress.configure(value=0)
+
+                self.status_var.set(
+                    f"Imagini încărcate: {len(self.session.keyframes)}. "
+                    "Bifează imaginile pe care vrei să le descrii."
+                )
+
             elif job == "ontology":
                 self.ontology_path = Path(result.source)
 
@@ -1002,13 +1082,19 @@ class WorkflowGUI:
         if self.busy or self.session is None:
             return
 
+        initial_dir = (
+            self.session.extraction.output_dir
+            if self.session.extraction is not None
+            else self.session.imported_frames[0].image_path.parent
+        )
+
         filename = filedialog.asksaveasfilename(
             parent=self.root,
-            title="Salvează sesiunea",
-            initialdir=str(self.session.extraction.output_dir),
-            initialfile=f"workflow_{self.session.session_id}.json",
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")],
+            title="Salvează sesiunea JSON-LD",
+            initialdir=str(initial_dir),
+            initialfile=f"workflow_{self.session.session_id}.jsonld",
+            defaultextension=".jsonld",
+            filetypes=[("JSON-LD", "*.jsonld")],
         )
 
         if not filename:
@@ -1019,13 +1105,23 @@ class WorkflowGUI:
         try:
             destination = Path(filename).resolve()
 
-            if destination.suffix.lower() != ".json":
-                raise ValueError("Folosește extensia .json.")
+            if destination.suffix.lower() != ".jsonld":
+                raise ValueError("Folosește extensia .jsonld.")
 
             protected = {
-                self.session.extraction.input_video.resolve(),
-                self.session.extraction.manifest.resolve(),
+                get_frame_path(
+                    self.session,
+                    frame.frame_id,
+                    must_exist=False,
+                )
+                for frame in self.session.keyframes
             }
+
+            if self.session.extraction is not None:
+                protected.update({
+                    self.session.extraction.input_video.resolve(),
+                    self.session.extraction.manifest.resolve(),
+                })
 
             if self.ontology_path:
                 protected.add(self.ontology_path.resolve())
@@ -1045,7 +1141,13 @@ class WorkflowGUI:
             ) as handle:
                 temporary = Path(handle.name)
                 handle.write(
-                    self.session.model_dump_json(indent=2) + "\n"
+                    json.dumps(
+                        session_to_jsonld(self.session),
+                        ensure_ascii=False,
+                        indent=2,
+                        allow_nan=False,
+                    )
+                    + "\n"
                 )
 
             temporary.replace(destination)
