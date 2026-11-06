@@ -33,6 +33,10 @@ def session_to_jsonld(session: WorkflowSession) -> dict[str, Any]:
         "description_status": "obs:descriptionStatus",
         "error": "obs:error",
         "ontology_path": "obs:ontologyPath",
+        "interpretation_settings": {
+            "@id": "obs:interpretationSettings",
+            "@type": "@json",
+        },
 
         # Păstrăm structura completă a rezultatului extragerii.
         "extraction": {

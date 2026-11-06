@@ -40,6 +40,7 @@ WorkflowSession
 ├── session_id, schema_version, created_at
 ├── extraction
 ├── ontology_path
+├── interpretation_settings — configurația curentă și contextul pregătit
 └── frames — listă ordonată de KeyframeState
     ├── id, type, frame_id
     ├── selected, description_status, error
@@ -71,6 +72,15 @@ anterioară poate fi păstrată împreună cu eroarea ultimei încercări.
 
 `ontology_path` înregistrează calea ontologiei încărcate. Prezența ei nu
 înseamnă că descrierea a fost mapată la acea ontologie.
+
+În schema sesiunii 2.2, `interpretation_settings` păstrează modelul, limba,
+domeniul, activarea contextului, namespace-ul, formatul, Turtle-ul și raportul
+extragerii. Este serializat ca valoare JSON în JSON-LD. Sesiunile 2.0 și 2.1
+rămân acceptate de modelul de date, cu setări implicite.
+
+Fiecare observație păstrează în `parameters.ontology_context` contextul folosit
+efectiv (sau `null`), inclusiv textul, hash-urile și versiunea extragerii.
+Schimbarea setărilor curente nu rescrie proveniența observațiilor existente.
 
 ### Proveniența și conținutul vizual
 

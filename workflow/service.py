@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
-from PIL import Image
+from interpretation.images import read_validated_image
 
 from extraction.models import ExtractedFrame, ExtractionResult
 
@@ -108,15 +108,11 @@ def create_session_from_images(
         if path in seen:
             continue
 
-        try:
-            with Image.open(path) as image:
-                image.verify()
-        except (OSError, ValueError) as exc:
-            raise ValueError(
-                f"Imagine invalidă: {path.name}"
-            ) from exc
+        read_validated_image(path)
 
         seen.add(path)
+
+
         imported.append(
             ImportedFrame(
                 frame_id=f"image_{uuid4().hex}",

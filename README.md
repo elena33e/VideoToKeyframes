@@ -1,37 +1,42 @@
 # VideoToKeyframes
 
-Aplicație desktop pentru extragerea cadrelor reprezentative din videoclipuri, folosind **PySceneDetect** pentru detectarea scenelor și **Katna** pentru selectarea keyframe-urilor.
+Aplicație desktop pentru extragerea cadrelor reprezentative din videoclipuri, selectarea lor manuală și generarea descrierilor cu ajutorul unui model vizual de limbaj — VLM.
 
-Scopul aplicației este obținerea unor imagini reprezentative pentru scenele unui videoclip, cu un număr de cadre adaptat duratei fiecărei scene.
+Extragerea folosește **PySceneDetect** pentru detectarea scenelor și **Katna** pentru selectarea keyframe-urilor. Imaginile selectate de utilizator sunt descrise prin API-ul OpenRouter, iar rezultatele pot fi salvate în **JSON-LD**.
 
-Interfața permite configurarea procesării, urmărirea progresului și previzualizarea imaginilor obținute.
+Aplicația permite și încărcarea directă a unor imagini existente, fără procesarea unui video.
 
 ## Funcționalități
 
-- Detectarea automată a schimbărilor de scenă.
-- Comasarea fragmentelor foarte scurte cu o scenă vecină.
-- Calcularea numărului de cadre solicitate în funcție de durata scenei.
-- Selectarea keyframe-urilor prin algoritmii Katna.
+- Detectarea scenelor și comasarea fragmentelor foarte scurte.
+- Extragerea unui număr de cadre adaptat duratei fiecărei scene.
 - Limitarea opțională a numărului total de cadre.
 - Configurarea numărului de procese utilizate de Katna.
-- Păstrarea rezultatelor valide când extragerea eșuează pentru unele scene.
-- Anularea procesării între operațiile principale.
-- Previzualizarea cadrelor extrase.
-- Generarea unui raport al rulării și, opțional, a unui raport de performanță.
+- Păstrarea rezultatelor valide când unele scene nu pot fi procesate.
+- Galerie cu miniaturi, previzualizare și selecție prin bifare.
+- Încărcarea directă a imaginilor JPEG, PNG și WEBP.
+- Descrierea imaginilor selectate: obiecte, caracteristici, relații, acțiuni, text vizibil și incertitudini.
+- Afișarea observațiilor și salvarea sesiunii în JSON-LD.
+- Pregătirea unui vocabular compact din ontologie, opțional pentru ghidarea descrierii.
+- Diagnosticarea separată a performanței extragerii.
 
-## Fluxul de procesare
+**Maparea observațiilor la ontologia încărcată nu este încă implementată.** VLM-ul poate primi contextul Turtle extras local, pentru ghidarea vocabularului. Folosirea lui este opțională.
 
-1. PySceneDetect analizează videoclipul și identifică intervalele scenelor folosind `ContentDetector`.
-2. Aplicația unește fragmentele mai scurte de 0,5 secunde cu o scenă vecină.
-3. Pentru fiecare scenă rezultată, aplicația calculează numărul de cadre solicitate.
-4. Dacă este activată limita globală, planul este ajustat pentru respectarea acesteia.
-5. Scenele selectate sunt exportate folosind funcția `split_video_ffmpeg` din PySceneDetect.
-6. Katna analizează fiecare clip și selectează cadrele reprezentative.
-7. Imaginile sunt salvate pe scene, iar aplicația generează raportul rulării.
+## Fluxul aplicației
 
-Dacă rezultă o singură scenă, videoclipul original este transmis direct către Katna, fără exportul unui clip separat.
+```text
+Video → extragere keyframes ──┐
+                             ├→ galerie → selecție → descriere VLM → JSON-LD
+Imagini încărcate direct ─────┘
 
-Scenele sunt procesate succesiv. Katna folosește intern procesare paralelă; numărul de procese se configurează din interfață.
+Ontologie + namespace → vocabular Turtle → context opțional pentru descrierea VLM
+```
+
+O sesiune conține fie cadrele unei extrageri, fie imagini încărcate direct. Începerea unei noi extrageri sau încărcarea unui nou set de imagini înlocuiește sesiunea din interfață, după confirmare dacă există modificări nesalvate.
+
+VLM-ul produce observații în JSON conform unei scheme. Aplicația validează structura și referințele dintre entități, adaugă metadatele și construiește local JSON-LD. Această conversie nu necesită un apel suplimentar la model.
+
+Detalii despre reprezentare: [Workflow și JSON-LD](workflow/README.md).
 
 ## Cerințe
 
@@ -39,13 +44,14 @@ Configurația folosită la testare:
 
 - Windows;
 - Python 3.11.11, pe 64 de biți;
-- Tkinter disponibil în instalarea Python;
-- pachetele din `requirements.txt`;
-- FFmpeg disponibil pentru bibliotecile utilizate.
+- Tkinter disponibil;
+- dependențele din `requirements.txt`;
+- FFmpeg disponibil pentru procesarea video;
+- acces la internet și o cheie OpenRouter pentru descrierea imaginilor.
 
-Interfața folosește `os.startfile` pentru deschiderea folderului cu rezultate. Prin urmare, versiunea actuală este destinată Windows.
+Extragerea, galeria și încărcarea ontologiei pot fi folosite fără cheia API.
 
-FFmpeg poate fi furnizat de pachetul `imageio-ffmpeg`, instalat ca dependență a Katna. PySceneDetect poate folosi și un executabil FFmpeg disponibil în `PATH`.
+FFmpeg poate fi furnizat de `imageio-ffmpeg`, instalat ca dependență a Katna. PySceneDetect poate folosi și un executabil FFmpeg disponibil în `PATH`.
 
 ## Instalare
 
@@ -53,26 +59,24 @@ Comenzile următoare se execută în PowerShell.
 
 ### 1. Obținerea proiectului
 
+Versiunea cu interfața unificată este dezvoltată pe branchul `feature/interpretation`:
+
 ```powershell
-git clone https://github.com/elena33e/VideoToKeyframes.git
+git clone --branch feature/interpretation https://github.com/elena33e/VideoToKeyframes.git
 cd VideoToKeyframes
 ```
 
-Alternativ, descarcă arhiva repository-ului și deschide un terminal în folderul extras.
-
-### 2. Crearea unui mediu virtual
+### 2. Crearea mediului virtual
 
 ```powershell
 py -3.11 -m venv .venv
 ```
 
-Dacă Python Launcher (`py`) nu este disponibil, folosește executabilul instalării Python 3.11.
-
 Se recomandă un mediu virtual nou, fără pachete preluate din alte proiecte.
 
 ### 3. Instalarea dependențelor
 
-Verifică existența fișierului:
+Verifică existența wheelului inclus în proiect:
 
 ```text
 wheels/scenedetect_core-0.7.2-py3-none-any.whl
@@ -88,292 +92,300 @@ Apoi rulează:
 
 Comenzile folosesc direct interpretul mediului virtual; activarea acestuia nu este necesară.
 
-`pip check` verifică cerințele declarate de pachete. Nu detectează toate conflictele posibile dintre fișierele instalate.
-
 ### 4. Verificarea componentelor
 
-Verificarea Tkinter:
+Pentru Tkinter:
 
 ```powershell
 .\.venv\Scripts\python.exe -m tkinter
 ```
 
-Comanda trebuie să deschidă o fereastră de test.
-
-Verificarea disponibilității FFmpeg pentru PySceneDetect:
+Pentru disponibilitatea FFmpeg în PySceneDetect:
 
 ```powershell
 .\.venv\Scripts\python.exe -c "from scenedetect import is_ffmpeg_available; print(is_ffmpeg_available())"
 ```
 
-Rezultatul așteptat este `True`.
+Rezultatul așteptat pentru FFmpeg este `True`.
 
 ## Particularități ale dependențelor
 
-### De ce este folosit un wheel local pentru PySceneDetect?
+Proiectul folosește un wheel local construit din configurația `scenedetect-core` a sursei PySceneDetect. Acesta permite utilizarea `opencv-contrib-python`, necesar pentru Katna, fără instalarea simultană a `opencv-python`.
 
-Distribuția standard PySceneDetect 0.7.2 declară o dependență de `opencv-python`, în timp ce Katna solicită `opencv-contrib-python`.
+Cele două distribuții OpenCV furnizează același modul `cv2`. Nu instala suplimentar `scenedetect[opencv]`, `opencv-python` sau variante OpenCV headless în acest mediu.
 
-Cele două pachete OpenCV furnizează același modul `cv2` și pot instala fișiere în aceleași locații.
+Opțiunea `--only-binary katna` din `requirements.txt` impune instalarea Katna din wheel. Configurația proiectului a fost testată cu Python 3.11.11 și Katna 0.9.2.
 
-Proiectul folosește un wheel construit din configurația `scenedetect-core` a sursei oficiale PySceneDetect 0.7.2. Aceasta permite utilizarea unui singur pachet OpenCV: `opencv-contrib-python`.
+Dependențele principale sunt fixate în `requirements.txt`; dependențele tranzitive nu sunt toate fixate individual.
 
-Wheelul este construit local; nu reprezintă un pachet `scenedetect-core` 0.7.2 descărcat de pe PyPI. Importurile din aplicație rămân `scenedetect`.
+## Configurarea descrierii imaginilor
 
-Nu instala suplimentar `scenedetect[opencv]`, `opencv-python` sau variantele OpenCV headless în acest mediu.
+Creează un fișier `.env` în rădăcina proiectului:
 
-### De ce apare `--only-binary katna`?
+```dotenv
+OPENROUTER_API_KEY=cheia_ta
+OPENROUTER_MODEL=nvidia/nemotron-3.5-super-vl:free
+```
 
-Această opțiune solicită instalarea Katna dintr-un wheel și împiedică revenirea automată la instalarea din surse.
+`OPENROUTER_MODEL` este opțional. Dacă lipsește, aplicația folosește modelul implicit din `interpretation/config.py`. Variabilele deja definite în mediul procesului au prioritate față de `.env`.
 
-Pentru Katna 0.9.2 există o neconcordanță între metadatele wheelului și restricția de versiune Python din scriptul de instalare din surse. Configurația proiectului a fost testată cu Python 3.11.11 și wheelul Katna 0.9.2.
+Fișierul `.env` este exclus din Git.
 
-Această verificare locală nu constituie o garanție de compatibilitate pentru alte versiuni Python.
+Valorile implicite sunt centralizate în `interpretation/config.py`:
 
-Fișierul `requirements.txt` fixează dependențele principale. Dependențele tranzitive nu sunt toate fixate individual.
+| Constantă | Rol |
+|---|---|
+| `DEFAULT_MODEL` | Modelul folosit implicit |
+| `DEFAULT_LANGUAGE` | Limba descrierilor |
+| `DEFAULT_DOMAIN_CONTEXT` | Domeniul folosit pentru ghidarea observației vizuale |
+
+Configurația actuală folosește limba engleză și domeniul încondeierii ouălor. Pentru testarea fără domeniu, setează `DEFAULT_DOMAIN_CONTEXT = ""`. Repornește aplicația după modificarea configurației.
+
+Domeniul poate ghida atenția modelului, dar nu confirmă prezența unui obiect, material sau procedeu. El este independent de ontologia încărcată.
+
+Modelul poate fi modificat și în GUI. Interfața de test acceptă identificatori terminați în `:free`; disponibilitatea și limitele lor depind de OpenRouter.
 
 ## Pornirea aplicației
 
-### Rulare obișnuită
+### Interfața unificată
 
 ```powershell
-.\.venv\Scripts\python.exe run_gui.py
+.\.venv\Scripts\python.exe run_workflow_gui.py
 ```
 
-Aplicația procesează videoclipul fără monitorizarea detaliată a performanței. Raportul `manifest.json` este generat în continuare.
+Din PyCharm, selectează interpretul `.venv/Scripts/python.exe` și pornește `run_workflow_gui.py` cu **Run**.
 
-### Rulare cu diagnostic
+### Diagnosticarea extragerii
 
 ```powershell
 .\.venv\Scripts\python.exe run_diagnostics.py
 ```
 
-Se deschide aceeași interfață și se folosește același flux de procesare. Suplimentar, monitorul încearcă să genereze `performance.json`.
+Acest lansator deschide interfața separată de extragere din `gui/app.py`, păstrată pentru diagnosticare. Monitorul încearcă să genereze suplimentar raportul `performance.json`.
 
-Monitorizarea poate introduce un cost suplimentar de execuție. Pentru utilizarea obișnuită, folosește `run_gui.py`.
+Diagnosticarea nu include fluxul de descriere VLM. Monitorizarea poate introduce un cost suplimentar de execuție; pentru utilizarea obișnuită folosește interfața unificată.
 
-Dacă diagnosticul nu poate porni sau raportul său nu poate fi salvat, aplicația afișează un avertisment în consolă și continuă procesarea atunci când este posibil.
+## Utilizarea interfeței unificate
 
-### Rulare din PyCharm
+### Extragerea din video
 
-Selectează drept interpret:
+1. În **1. Sursă**, alege pornirea de la un videoclip și directorul rezultatelor.
+2. Configurează intervalul și limita de cadre. Pragul detectorului și procesele sunt în **Setări avansate de extragere**.
+3. Apasă **Extrage cadrele**.
+4. Aplicația deschide **2. Selectare imagini**.
 
-```text
-.venv/Scripts/python.exe
-```
+### Încărcarea imaginilor existente
 
-Pornește `run_gui.py` sau `run_diagnostics.py` cu **Run**.
+În **1. Sursă**, alege **Am deja imagini**, apoi **Încarcă imaginile…**.
 
-Pentru diagnostic, evită rularea simultană cu un alt profiler.
+Fișierele sunt utilizate din locația originală, fără copiere. Dacă le muți sau le ștergi, sesiunea nu le mai poate accesa. Pentru acestea nu sunt atribuite artificial scene sau intervale temporale.
 
-## Utilizarea interfeței
+### Selecția și descrierea
 
-1. Selectează videoclipul.
-2. Alege folderul pentru rezultate.
-3. Configurează opțiunile.
-4. Apasă **Start procesare**.
-5. La final, folosește **Deschide rezultatele** sau **Vezi cadrele**.
+1. În **2. Selectare imagini**, apasă pe miniaturi pentru previzualizare și bifează imaginile relevante.
+2. Apasă **Continuă cu … imagini**.
+3. În **3. Configurare interpretare**, verifică domeniul, limba și modelul; pregătește opțional contextul ontologic.
+4. Verifică rezumatul și apasă **Descrie cele … imagini**.
+5. În **4. Rezultate**, alege imaginea din listă și consultă **Descriere** sau **JSON-LD**.
 
-| Opțiune | Rol |
-| --- | --- |
-| Secunde de scenă / keyframe | Controlează numărul de cadre solicitate în funcție de durata scenei. |
-| Prag detectare scene | Controlează sensibilitatea detectorului la schimbările vizuale. |
-| Procese Katna | Stabilește numărul de procese folosite intern de Katna. |
-| Limitează numărul total de cadre | Activează un plafon global pentru planul de extragere. |
+Poți reveni între pași fără să pierzi selecția sau rezultatele.
 
-### Numărul de cadre pe scenă
+Descrierea se execută secvențial pentru imaginile selectate. O eroare este asociată imaginii respective și nu oprește automat restul lotului.
 
-În absența limitei globale, calculul este:
+Observațiile existente sunt păstrate fără un nou apel dacă imaginea nu s-a schimbat și regenerarea nu este bifată. Pentru repetarea analizei, inclusiv după schimbarea modelului, domeniului sau contextului, bifează regenerarea în **4. Rezultate**, apoi revino la configurare.
+
+### Ontologia
+
+În **3. Configurare interpretare**, activează **Ghidează descrierea folosind o ontologie**.
+Încarcă fișierul RDF/XML, Turtle sau N-Triples, verifică namespace-ul propus (editabil)
+și apasă **Pregătește contextul**. Pentru un fișier cu extensie ambiguă, selectează explicit formatul.
+
+Contextul pornește de la IRI-urile proprii și păstrează referințele externe relevante.
+Poți consulta și exporta Turtle-ul din **Vezi contextul și detaliile**.
+Schimbarea fișierului, formatului sau namespace-ului invalidează contextul pregătit.
+La pornirea analizei se verifică și dacă fișierul sursă s-a schimbat pe disc.
+Același context este folosit pentru toate imaginile din lot; fiecare observație păstrează
+textul și hash-ul contextului efectiv utilizat.
+
+Cu context activ, promptul cere denumiri de domeniu din vocabularul furnizat:
+etichete existente sau, în lipsa lor, numele locale din IRI. Termenii românești
+sunt păstrați și când limba descrierii este alta. Detaliile vizuale rămân în
+limbaj natural. Un obiect fără termen potrivit primește o descriere neutră,
+iar lipsa termenului sau identificarea incertă se consemnează în incertitudini.
+Relațiile structurate folosesc numai termeni de relație disponibili; dacă lipsesc,
+aranjamentul vizual este descris în text. Nu se clasifică indivizi și nu se
+populează ontologia în această etapă.
+
+Acestea sunt instrucțiuni pentru model; validarea curentă verifică schema
+răspunsului, nu garantează respectarea vocabularului sau identificarea corectă.
+
+Încărcarea nu declanșează descriere, mapare sau inferență ontologică. Importurile externe declarate în ontologie nu sunt încărcate automat.
+
+### Salvarea
+
+Apasă **Salvează sesiunea…** sau **Salvează rezultatele…** și alege destinația.
+
+Sesiunea include toate imaginile și stările lor, selecția, observațiile disponibile, configurația curentă și contextul pregătit. Salvarea este explicită; afișarea descrierilor nu salvează automat sesiunea.
+
+**Reîncărcarea unei sesiuni salvate nu este încă implementată în GUI.**
+
+### Anularea
+
+**Oprește după operația curentă** solicită oprirea între operații. O operație de extragere sau o cerere VLM deja începută poate trebui să se încheie înainte de oprire.
+
+Rezultatele obținute până atunci rămân disponibile. Pentru păstrarea observațiilor, salvează sesiunea.
+
+## Cum funcționează extragerea
+
+PySceneDetect identifică scenele folosind `ContentDetector`. Aplicația comasează fragmentele mai scurte de 0,5 secunde, calculează numărul de cadre solicitate și exportă scenele selectate prin FFmpeg. Katna analizează clipurile și alege imaginile reprezentative.
+
+Dacă rezultă o singură scenă, videoclipul original este transmis direct către Katna.
+
+Scenele sunt procesate succesiv. Katna folosește intern procesare paralelă, configurabilă din GUI.
+
+Fără limită globală:
 
 ```text
 cadre solicitate = max(1, ceil(durata scenei / secunde per keyframe))
 ```
 
-Pentru un interval de 15 secunde:
+Pentru un interval de 15 secunde, o scenă de 40 de secunde solicită trei cadre. Aceasta nu înseamnă extragerea unei imagini exact la fiecare 15 secunde; pozițiile sunt alese de Katna.
 
-| Durata scenei | Cadre solicitate |
-| --- | ---: |
-| 5 secunde | 1 |
-| 15 secunde | 1 |
-| 16 secunde | 2 |
-| 40 de secunde | 3 |
+Dacă limita globală permite cel puțin un cadru pentru fiecare scenă, aplicația rezervă câte unul și distribuie restul proporțional cu cererea. Dacă limita este mai mică decât numărul scenelor, selectează scene distribuite pe durata videoclipului.
 
-Valoarea reprezintă numărul de cadre solicitate către Katna. Nu înseamnă extragerea unei imagini exact la fiecare 15 secunde; pozițiile cadrelor sunt stabilite prin selecția Katna.
+Limita este un plafon, nu o garanție: Katna poate furniza mai puține imagini decât cele solicitate.
 
-Katna poate furniza mai puține imagini decât cele solicitate.
+| Parametru | Efect |
+|---|---|
+| Secunde de scenă / keyframe | Controlează numărul de cadre solicitate |
+| Limită cadre | Plafonează planul de extragere; câmpul gol dezactivează limita |
+| Prag detectare scene | Un prag mai mic produce, în general, mai multe delimitări |
+| Procese Katna | Controlează paralelismul intern; creșterea valorii nu garantează accelerarea |
 
-### Limita globală
+Pragul intern pentru comasare este definit prin `MIN_SCENE_DURATION_SECONDS` în `extraction/pipeline.py`. Fereastra Katna este de 15 cadre, definită prin `KATNA_WINDOW_FRAMES` în `extraction/keyframe_extractor.py`. Acești parametri nu sunt expuși în GUI.
 
-Când limita este dezactivată, sunt planificate toate scenele rezultate după comasare.
+## Rezultate și rapoarte
 
-Când limita este activată:
-
-- dacă permite cel puțin un cadru pentru fiecare scenă, aplicația rezervă câte unul și distribuie cadrele suplimentare proporțional cu cererea;
-- dacă este mai mică decât numărul scenelor, aplicația selectează scene distribuite pe durata videoclipului și solicită câte un cadru pentru fiecare.
-
-Limita reprezintă un plafon, nu un număr de imagini garantat.
-
-### Pragul de detectare
-
-Un prag mai mic produce, în general, mai multe delimitări de scene. Un prag mai mare produce mai puține delimitări.
-
-Detectarea se bazează pe schimbări vizuale și nu identifică automat toate schimbările de acțiune sau de semnificație.
-
-### Numărul de procese
-
-Creșterea numărului de procese nu garantează reducerea timpului de procesare. Rezultatul depinde de procesor, memorie, rezoluția videoclipului și costul pornirii proceselor.
-
-### Anularea
-
-Butonul **Anulează** solicită oprirea între operațiile principale.
-
-O operație PySceneDetect, FFmpeg sau Katna aflată deja în desfășurare poate trebui să se încheie înainte de oprire. Rezultatele salvate sunt păstrate.
-
-## Organizarea rezultatelor
-
-Fiecare rulare creează un folder separat, cu numele videoclipului, data, ora și un identificator unic.
-
-Exemplu orientativ:
+Fiecare extragere creează un director separat:
 
 ```text
 output/
 └── videoclip_DATA_ORA_ID/
     ├── scenes/
-    │   ├── scene_0001/
-    │   │   └── scene-0001.mp4
-    │   └── scene_0002/
-    │       └── scene-0002.mp4
     ├── keyframes/
-    │   ├── scene_0001/
-    │   │   └── scene-0001_0.jpeg
-    │   └── scene_0002/
-    │       └── scene-0002_0.jpeg
     ├── manifest.json
     └── performance.json
 ```
 
-`performance.json` este prezent numai dacă monitorizarea a fost activată și raportul a putut fi salvat.
+- `scenes/` conține clipurile exportate; poate lipsi pentru o singură scenă.
+- `keyframes/` conține imaginile organizate pe scene.
+- `manifest.json` conține setările, intervalele scenelor, cadrele, stările și erorile extragerii.
+- `performance.json` apare numai dacă diagnosticarea a fost activată și raportul a putut fi salvat.
+- `workflow_<session_id>.jsonld` este salvat separat, la destinația aleasă din GUI.
 
-Pentru o singură scenă, folderul `scenes/` poate lipsi, deoarece este utilizat videoclipul original.
+Manifestul este scris la încheierea controlată a extragerii. O închidere forțată poate lăsa rezultate fără raport final.
 
-Indicii scenelor pot avea întreruperi după comasare sau selecția impusă de limita globală.
+Intervalele temporale aparțin scenelor; momentul exact al fiecărui keyframe nu este disponibil. Numerotarea imaginilor nu garantează ordinea lor cronologică în scenă.
 
-Numerotarea imaginilor indică ordinea în care sunt furnizate de Katna. Nu garantează ordinea lor cronologică în scenă.
+Raportul de performanță include timpi pentru detectare, export și extragere. Unele măsurători se suprapun și nu trebuie însumate ca etape independente. Raportul nu reprezintă o măsurare completă CPU/RAM.
 
-### `manifest.json`
-
-Raportul conține:
-
-- setările rulării;
-- intervalele scenelor;
-- numărul scenelor detectate, selectate, procesate și cu imagini;
-- numărul cadrelor solicitate și salvate;
-- căile imaginilor;
-- starea fiecărei scene;
-- erorile întâlnite;
-- starea finală a procesării.
-
-Intervalele temporale descriu scenele din videoclipul original. Momentul exact al fiecărui keyframe nu este disponibil în implementarea actuală.
-
-Manifestul este scris la încheierea controlată a rulării. O închidere forțată a procesului poate lăsa rezultate fără raport final.
-
-### `performance.json`
-
-Raportul de diagnostic include timpi pentru detectare, export și extragere, precum și observații despre selecția Katna și crearea grupurilor de procese.
-
-Unele măsurători sunt incluse în altele: selecția și filtrarea fac parte din extragere. Timpii nu trebuie însumați ca etape independente.
-
-Raportul nu reprezintă o măsurare completă a utilizării CPU sau RAM.
-
-## Interpretarea rezultatului
+### Stările extragerii
 
 | Stare | Semnificație |
-| --- | --- |
-| `success` | Toate scenele selectate au produs cel puțin o imagine validă. |
-| `partial` | Au fost salvate imagini, dar unele scene au eșuat. |
-| `failed` | A apărut o eroare critică sau nu s-a extras nicio imagine. |
-| `cancelled` | Procesarea a fost anulată; rezultatele deja salvate sunt păstrate. |
+|---|---|
+| `success` | Toate scenele selectate au produs cel puțin o imagine validă |
+| `partial` | Există imagini salvate, dar unele scene au eșuat |
+| `failed` | Eroare critică sau nicio imagine extrasă |
+| `cancelled` | Procesarea a fost anulată; rezultatele deja salvate sunt păstrate |
 
-O rulare poate fi raportată ca reușită chiar dacă anumite scene au fost omise intenționat prin limita globală. Numărul acestora este afișat separat.
+Scenele omise intenționat prin limita globală nu fac automat rularea nereușită.
 
-Succesul tehnic confirmă salvarea imaginilor, nu și relevanța lor pentru orice utilizare ulterioară. Calitatea se verifică prin previzualizare.
-
-Mesajul „Katna nu a generat imagini valide” nu demonstrează că scena nu conține cadre relevante. Poate indica faptul că selecția internă nu a furnizat candidați acceptați.
+Succesul tehnic confirmă obținerea imaginilor, nu relevanța lor semantică. Similar, validarea observațiilor verifică structura datelor și referințele, fără să garanteze corectitudinea descrierii vizuale.
 
 ## Structura proiectului
 
 ```text
 VideoToKeyframes/
+├── extraction/
+│   ├── interfaces.py
+│   ├── models.py
+│   ├── scene_detector.py
+│   ├── keyframe_extractor.py
+│   ├── pipeline.py
+│   └── performance_monitor.py
+├── interpretation/
+│   ├── config.py
+│   ├── describe.py
+│   ├── observations.py
+│   ├── ontology.py
+│   ├── models.py
+│   └── jsonld_context.py
+├── workflow/
+│   ├── models.py
+│   ├── service.py
+│   ├── description.py
+│   ├── jsonld.py
+│   └── README.md
 ├── gui/
-│   ├── __init__.py
+│   ├── workflow_app.py
+│   ├── keyframe_gallery.py
 │   └── app.py
 ├── wheels/
 │   └── scenedetect_core-0.7.2-py3-none-any.whl
-├── interfaces.py
-├── scene_detector.py
-├── keyframe_extractor.py
-├── pipeline.py
-├── performance_monitor.py
-├── run_gui.py
+├── run_workflow_gui.py
 ├── run_diagnostics.py
 ├── requirements.txt
 ├── README.md
 └── .gitignore
 ```
 
-| Fișier                   | Responsabilitate |
-|--------------------------| --- |
-| `gui/app.py`             | Interfața, validarea opțiunilor, progresul și previzualizarea. |
-| `interfaces.py`          | Modelul unei scene și contractele serviciilor. |
-| `scene_detector.py`      | Detectarea scenelor și exportul clipurilor prin PySceneDetect. |
-| `keyframe_extractor.py`  | Configurarea Katna, extragerea și salvarea verificată a imaginilor. |
-| `pipeline.py`            | Comasarea scenelor, planificarea cadrelor și coordonarea procesării. |
-| `performance_monitor.py` | Monitorizarea opțională și raportul de performanță. |
-| `run_gui.py`             | Pornirea obișnuită. |
-| `run_diagnostics.py`     | Pornirea cu monitorizare. |
+Fișierele `__init__.py` ale pachetelor sunt omise din schemă.
 
-## Parametri interni
+| Componentă | Responsabilitate |
+|---|---|
+| `extraction` | Detectarea scenelor, extragerea cadrelor și rapoartele |
+| `interpretation` | Apelul VLM, validarea observațiilor, configurația și încărcarea ontologiei |
+| `workflow` | Sesiunea, selecția, procesarea imaginilor și exportul JSON-LD |
+| `gui/workflow_app.py` | Interfața unificată și coordonarea operațiilor din fundal |
+| `gui/keyframe_gallery.py` | Miniaturi, paginare, selecție și previzualizare |
+| `gui/app.py` | Interfața de extragere păstrată pentru diagnosticare |
 
-În versiunea actuală:
+Serviciile sunt separate de interfață pentru a putea fi reutilizate ulterior prin endpointuri API. API-ul și frontendul separat nu sunt încă implementate.
 
-- pragul pentru comasarea scenelor foarte scurte este de **0,5 secunde**, stabilit în `main.py`;
-- fereastra Katna este de **15 cadre**, stabilită prin `KATNA_WINDOW_FRAMES` în `keyframe_extractor.py`.
-
-Acești parametri nu sunt configurați din interfață.
-
-Fereastra Katna se aplică prin configurația bibliotecii înainte de extragere. Proiectul nu modifică fișierele sursă instalate ale Katna.
+Pentru extrageri simultane într-un viitor API, modificarea configurației globale Katna va necesita izolare sau sincronizare.
 
 ## Întreținerea wheelului PySceneDetect
 
-Wheelul folosește sursa oficială PySceneDetect corespunzătoare commitului:
+Wheelul inclus folosește sursa corespunzătoare commitului:
 
 ```text
 7cd1005e8349d8e913d0930fc1750363eb4ddc51
 ```
 
-Pentru reconstruirea lui, din rădăcina proiectului:
+Reconstruire din rădăcina proiectului:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip wheel --no-deps --wheel-dir .\wheels "https://github.com/Breakthrough/PySceneDetect/archive/7cd1005e8349d8e913d0930fc1750363eb4ddc51.zip"
 ```
 
-Operația necesită acces la internet. Nu este necesară pentru instalarea obișnuită dacă wheelul este inclus în repository.
+Operația necesită internet și nu este necesară pentru instalarea obișnuită dacă wheelul există deja.
 
-La actualizarea PySceneDetect trebuie verificate din nou metadatele pachetului, compatibilitatea cu OpenCV contrib și rezultatele procesării. Numele wheelului din `requirements.txt` trebuie actualizat corespunzător.
+La actualizare trebuie reverificate metadatele, compatibilitatea cu OpenCV contrib și rezultatele extragerii. Actualizează și numele wheelului din `requirements.txt`, dacă se schimbă.
 
-## Fișiere locale excluse din Git
+## Fișiere locale
 
-Repository-ul exclude mediul virtual, rezultatele, videoclipurile locale de test, fișierele temporare Katna și configurarea locală PyCharm.
+`.gitignore` exclude mediile virtuale, `.env`, rezultatele din `output/`, videoclipurile locale de test, fișierele temporare Katna și configurația PyCharm.
 
-Fișierul wheel necesar instalării trebuie inclus în Git.
+Exporturile salvate în alte directoare nu sunt automat excluse de regula pentru `output/`.
 
-Folderele unei rulări din `output/` pot fi șterse după ce rezultatele necesare au fost păstrate. Ștergerea clipurilor din `scenes/` împiedică inspectarea lor ulterioară, dar nu șterge imaginile din `keyframes/`.
+Wheelul necesar instalării este păstrat în repository. Sesiunile JSON-LD conțin referințe la fișierele locale, nu copiile imaginilor; păstrează imaginile împreună cu rezultatele necesare.
 
-## Biblioteci utilizate
+## Biblioteci principale
 
-- [PySceneDetect](https://www.scenedetect.com/) — detectarea scenelor și exportul clipurilor.
-- [Katna](https://katna.readthedocs.io/) — selectarea keyframe-urilor.
-- [OpenCV](https://opencv.org/) — operații asupra imaginilor și suport video.
-- [FFmpeg](https://ffmpeg.org/) — procesarea și exportul video.
-- [Pillow](https://python-pillow.org/) — previzualizarea imaginilor.
-- [Tkinter](https://docs.python.org/3/library/tkinter.html) — interfața grafică.
+- PySceneDetect și FFmpeg — detectarea scenelor și exportul clipurilor.
+- Katna și OpenCV — selecția și procesarea cadrelor.
+- Pillow și Tkinter — imaginile și interfața grafică.
+- HTTPX — comunicarea cu OpenRouter.
+- Pydantic — validarea observațiilor și a sesiunii.
+- RDFLib — încărcarea ontologiilor.
+- python-dotenv — încărcarea configurației locale din `.env`.

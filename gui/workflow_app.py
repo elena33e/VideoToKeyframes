@@ -1,9 +1,10 @@
 """Interfață comună pentru extragere, selecție și descriere."""
 
+import hashlib
 import json
+from collections import Counter
 import math
 import os
-import tempfile
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -11,15 +12,18 @@ from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+
 from PIL import Image, ImageOps, ImageTk
 
 from extraction.keyframe_extractor import KatnaKeyframeExtractorService
 from extraction.pipeline import PipelineError, VideoProcessingPipeline
 from extraction.scene_detector import PySceneDetectorService
-from interpretation.describe import DescriptionConfig, OpenRouterImageDescriber
+from interpretation.describe import DescriptionConfig
+from interpretation.describe_batch import GeminiBatchDescriber
 from interpretation.ontology import load_ontology
-from workflow.description import describe_selected
-from workflow.models import WorkflowSession
+from interpretation.ontology_context import build_ontology_context
+from workflow.description_batch import describe_selected_batches
+from workflow.models import InterpretationSettings, WorkflowSession
 from workflow.service import (
     create_session,
     create_session_from_images,
@@ -27,14 +31,13 @@ from workflow.service import (
     set_selection,
 )
 from gui.keyframe_gallery import KeyframeGallery
-from workflow.jsonld import session_to_jsonld
+from workflow.persistence import save_session_jsonld
 
-
-DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
-
-# Modifică aici domeniul pentru testare.
-# Pentru descriere fără context de domeniu, folosește "".
-TEST_DOMAIN = "Traditional egg decorating (încondeierea ouălor)"
+from interpretation.config import (
+    DEFAULT_MODEL,
+    DEFAULT_LANGUAGE,
+    DEFAULT_DOMAIN_CONTEXT,
+)
 
 STATUS_LABELS = {
     "pending": "Nedescris",
@@ -46,6 +49,9 @@ STATUS_LABELS = {
 
 def observation_text(result):
     obs = result.observation
+    grouped = result.usage.get("scope") == "request"
+    usage = result.usage.get("request_usage", {}) if grouped else result.usage
+    scope = " (întregul apel, comun cadrelor din grup)" if grouped else ""
     names = {entity.id: entity.name for entity in obs.entities}
 
     lines = [obs.description, "", "OBIECTE"]
@@ -79,8 +85,8 @@ def observation_text(result):
     lines += [
         "",
         f"Model: {result.resolved_model}",
-        f"Durată: {result.elapsed_seconds:.2f} s",
-        f"Tokeni: {result.usage.get('total_tokens', 'indisponibil')}",
+        f"Durată{scope}: {result.elapsed_seconds:.2f} s",
+        f"Tokeni{scope}: {usage.get('total_tokens', 'indisponibil')}",
     ]
 
     return "\n".join(lines)
@@ -93,6 +99,10 @@ class WorkflowGUI:
 
         self.session = None
         self.ontology_path = None
+        self.ontology_context = None
+        self.selection_preview_photo = None
+        self.advanced_open = False
+        self.context_details_open = False
 
         self.events = Queue()
         self.cancel_event = threading.Event()
@@ -114,7 +124,20 @@ class WorkflowGUI:
             value=str(min(2, os.cpu_count() or 1))
         )
         self.model_var = tk.StringVar(value=model or DEFAULT_MODEL)
+        self.batch_size_var = tk.StringVar(value="3")
         self.regenerate_var = tk.BooleanVar(value=False)
+        self.source_mode = tk.StringVar(value="video")
+        self.domain_var = tk.StringVar(value=DEFAULT_DOMAIN_CONTEXT)
+        self.language_var = tk.StringVar(
+            value={"English": "Engleză", "Romanian": "Română"}.get(DEFAULT_LANGUAGE, DEFAULT_LANGUAGE)
+        )
+        self.use_ontology_var = tk.BooleanVar(value=False)
+        self.namespace_var = tk.StringVar()
+        self.ontology_format_var = tk.StringVar(value="După extensie")
+        self.ontology_file_var = tk.StringVar(value="Nicio ontologie încărcată.")
+        self.context_status_var = tk.StringVar(value="Încarcă ontologia și alege namespace-ul.")
+        self.summary_var = tk.StringVar()
+        self.readiness_var = tk.StringVar()
 
         self.status_var = tk.StringVar(
             value="Încarcă un video sau imagini pentru a începe."
@@ -126,10 +149,17 @@ class WorkflowGUI:
         root.minsize(1050, 720)
 
         self._build_ui()
+        for variable in (self.namespace_var, self.ontology_format_var):
+            variable.trace_add("write", self._invalidate_context)
+        for variable in (
+            self.model_var, self.language_var, self.domain_var,
+            self.use_ontology_var, self.regenerate_var,
+        ):
+            variable.trace_add("write", self._settings_changed)
         self._sync_controls()
 
         root.protocol("WM_DELETE_WINDOW", self._close)
-        root.after(100, self._poll_events)
+        self.poll_id = root.after(100, self._poll_events)
 
     def _button(self, parent, text, command):
         button = ttk.Button(parent, text=text, command=command)
@@ -164,303 +194,559 @@ class WorkflowGUI:
         widget.configure(state="disabled")
 
     def _build_ui(self):
-        main = ttk.Frame(self.root, padding=12)
+        style = ttk.Style(self.root)
+        style.configure("StepTitle.TLabel", font=("Segoe UI", 17, "bold"))
+        style.configure("StepHint.TLabel", foreground="#526274")
+        style.configure("Primary.TButton", padding=(16, 9))
+        style.configure("TNotebook.Tab", padding=(14, 9))
+
+        main = ttk.Frame(self.root, padding=14)
         main.pack(fill="both", expand=True)
-
         self.tabs = ttk.Notebook(main)
-        self.tabs.pack(fill="both", expand=True)
-
-        video_tab = ttk.Frame(self.tabs, padding=12)
-        self.frames_tab = ttk.Frame(self.tabs, padding=12)
-        ontology_tab = ttk.Frame(self.tabs, padding=12)
-
+        self.source_tab = ttk.Frame(self.tabs, padding=16)
+        self.frames_tab = ttk.Frame(self.tabs, padding=16)
+        self.config_tab = ttk.Frame(self.tabs, padding=16)
+        self.results_tab = ttk.Frame(self.tabs, padding=16)
         for tab, title in (
-            (video_tab, "1. Încărcare și extragere"),
-            (self.frames_tab, "2. Cadre și descrieri"),
-            (ontology_tab, "3. Ontologie"),
+            (self.source_tab, "1. Sursă"),
+            (self.frames_tab, "2. Selectare imagini"),
+            (self.config_tab, "3. Configurare interpretare"),
+            (self.results_tab, "4. Rezultate"),
         ):
             self.tabs.add(tab, text=title)
 
-        # Video și configurarea extragerii.
-        video_tab.columnconfigure(1, weight=1)
+        self._build_source_step()
+        self._build_selection_step()
+        self._build_configuration_step()
+        self._build_results_step()
 
-        fields = [
-            ("Video", self.video_var),
-            ("Director rezultate", self.output_var),
-            ("Secunde de scenă / keyframe", self.seconds_var),
-            ("Limită cadre (gol = fără limită)", self.limit_var),
-            ("Prag detectare scene", self.threshold_var),
-            ("Procese Katna", self.workers_var),
-        ]
-
-        for row, (label, variable) in enumerate(fields):
-            ttk.Label(video_tab, text=label).grid(
-                row=row,
-                column=0,
-                sticky="w",
-                padx=(0, 12),
-                pady=7,
-            )
-            self._entry(video_tab, variable).grid(
-                row=row,
-                column=1,
-                sticky="ew",
-                pady=7,
-            )
-
-        self._button(
-            video_tab, "Alege video…", self._choose_video
-        ).grid(row=0, column=2, padx=8)
-
-        self._button(
-            video_tab, "Alege director…", self._choose_output
-        ).grid(row=1, column=2, padx=8)
-
-        self._button(
-            video_tab, "Extrage keyframes", self._extract
-        ).grid(
-            row=6,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            pady=15,
+        footer = ttk.Frame(main)
+        footer.pack(side="bottom", fill="x", pady=(10, 0))
+        self.save_button = self._button(
+            footer, "Salvează sesiunea…", self._save
         )
-
+        self.save_button.pack(side="left")
+        self.cancel_button = ttk.Button(
+            footer,
+            text="Oprește după operația curentă",
+            command=self._cancel,
+        )
+        self.cancel_button.pack(side="left", padx=10)
+        self.progress = ttk.Progressbar(footer, maximum=100)
+        self.progress.pack(side="right", fill="x", expand=True, padx=(20, 0))
         ttk.Label(
-            video_tab,
-            text=(
-                "După extragere, selectează cadrele "
-                "pe care vrei să le descrii."
-            ),
-        ).grid(row=7, column=0, columnspan=3, sticky="w")
+            main, textvariable=self.status_var, wraplength=1050,
+        ).pack(side="bottom", fill="x", pady=(8, 0))
+        self.tabs.pack(fill="both", expand=True)
 
-        self._button(
-            video_tab,
-            "Încarcă imagini existente…",
-            self._choose_images,
-        ).grid(
-            row=8,
-            column=0,
-            columnspan=3,
-            sticky="w",
-            pady=(20, 0),
+    def _heading(self, parent, title, hint):
+        ttk.Label(parent, text=title, style="StepTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            parent, text=hint, style="StepHint.TLabel", wraplength=950,
+        ).pack(anchor="w", pady=(4, 16))
+
+    def _primary(self, parent, text, command):
+        button = self._button(parent, text, command)
+        button.configure(style="Primary.TButton")
+        return button
+
+    def _field(self, parent, row, label, variable, width=45):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky="w", padx=(0, 14), pady=6
         )
+        entry = self._entry(parent, variable, width)
+        entry.grid(row=row, column=1, sticky="ew", pady=6)
+        return entry
 
-        # Galerie și previzualizare.
-        tab = self.frames_tab
-        tab.columnconfigure(0, weight=1, minsize=420)
-        tab.columnconfigure(1, weight=1, minsize=450)
-        tab.rowconfigure(0, weight=1)
-
-        gallery_panel = ttk.Frame(tab)
-        gallery_panel.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(0, 12),
+    def _build_source_step(self):
+        self._heading(
+            self.source_tab, "Cu ce vrei să începi?",
+            "Alege un videoclip pentru extragerea cadrelor sau încarcă imaginile existente.",
         )
-        gallery_panel.rowconfigure(0, weight=1)
-        gallery_panel.columnconfigure(0, weight=1)
+        choices = ttk.Frame(self.source_tab)
+        choices.pack(fill="x", pady=(0, 18))
+        for value, label in (
+            ("video", "Pornesc de la un videoclip"),
+            ("images", "Am deja imagini"),
+        ):
+            radio = ttk.Radiobutton(
+                choices, text=label, value=value,
+                variable=self.source_mode, command=self._show_source_mode,
+            )
+            radio.pack(side="left", padx=(0, 30))
+            self.controls.append(radio)
 
+        self.video_panel = ttk.Frame(self.source_tab)
+        self.video_panel.pack(fill="x")
+        fields = ttk.Frame(self.video_panel)
+        fields.pack(fill="x")
+        fields.columnconfigure(1, weight=1)
+        for row, label, variable in (
+            (0, "Videoclip", self.video_var),
+            (1, "Directorul rezultatelor", self.output_var),
+            (2, "Secunde de scenă / cadru solicitat", self.seconds_var),
+            (3, "Număr maxim de cadre (opțional)", self.limit_var),
+        ):
+            self._field(fields, row, label, variable)
+        self._button(fields, "Alege video…", self._choose_video).grid(
+            row=0, column=2, padx=(12, 0)
+        )
+        self._button(fields, "Alege director…", self._choose_output).grid(
+            row=1, column=2, padx=(12, 0)
+        )
+        ttk.Label(
+            self.video_panel,
+            text="Cadrele sunt alese după conținut; intervalul controlează numărul solicitat.",
+            style="StepHint.TLabel", wraplength=900,
+        ).pack(anchor="w", pady=8)
+        self.advanced_button = self._button(
+            self.video_panel, "▸ Setări avansate de extragere", self._toggle_advanced
+        )
+        self.advanced_button.pack(anchor="w", pady=6)
+        self.advanced_panel = ttk.Frame(self.video_panel)
+        self.advanced_panel.columnconfigure(1, weight=1)
+        self._field(self.advanced_panel, 0, "Prag detectare scene", self.threshold_var)
+        self._field(self.advanced_panel, 1, "Procese Katna", self.workers_var)
+        self.extract_button = self._primary(
+            self.video_panel, "Extrage cadrele", self._extract
+        )
+        self.extract_button.pack(anchor="e", pady=16)
+
+        self.images_panel = ttk.Frame(self.source_tab)
+        ttk.Label(
+            self.images_panel,
+            text="Poți selecta mai multe imagini JPEG, PNG sau WEBP.\n"
+                 "După încărcare, alegi imaginile pe care vrei să le descrii.",
+        ).pack(anchor="w", pady=10)
+        self._primary(
+            self.images_panel, "Încarcă imaginile…", self._choose_images
+        ).pack(anchor="e", pady=16)
+
+    def _build_selection_step(self):
+        self._heading(
+            self.frames_tab, "Alege imaginile relevante",
+            "Bifează imaginile pentru analiză. Apasă pe o miniatură pentru previzualizare.",
+        )
+        body = ttk.Frame(self.frames_tab)
+        body.columnconfigure(0, weight=1, minsize=380)
+        body.columnconfigure(1, weight=1, minsize=440)
+        body.rowconfigure(0, weight=1)
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
         self.gallery = KeyframeGallery(
-            gallery_panel,
-            on_selection=self._selection_changed,
-            on_preview=self._show_frame,
+            left, on_selection=self._selection_changed, on_preview=self._show_frame
         )
         self.gallery.grid(row=0, column=0, sticky="nsew")
-
-        selection = ttk.Frame(gallery_panel)
-        selection.grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            pady=8,
+        selection = ttk.Frame(left)
+        selection.grid(row=1, column=0, sticky="ew", pady=8)
+        self._button(selection, "Selectează toate", lambda: self._select(True)).pack(side="left")
+        self._button(selection, "Deselectează toate", lambda: self._select(False)).pack(
+            side="left", padx=8
         )
-
-        self._button(
-            selection, "Toate", lambda: self._select(True)
-        ).pack(side="left")
-
-        self._button(
-            selection, "Niciunul", lambda: self._select(False)
-        ).pack(side="left", padx=8)
-
-        ttk.Label(
-            gallery_panel,
-            textvariable=self.selection_var,
-        ).grid(row=2, column=0, sticky="w")
-
-        ttk.Label(
-            gallery_panel,
-            text=(
-                "Bifă = include la descriere. "
-                "Clic pe imagine = previzualizare."
-            ),
-            wraplength=400,
-        ).grid(row=3, column=0, sticky="w", pady=5)
-
-        viewer = ttk.Frame(tab)
+        viewer = ttk.Frame(body)
         viewer.grid(row=0, column=1, sticky="nsew")
+        self.selection_picture = ttk.Label(
+            viewer, text="Încarcă mai întâi un video sau imagini în pasul 1.",
+            anchor="center", wraplength=430,
+        )
+        self.selection_picture.pack(fill="both", expand=True)
+        self.selection_caption = ttk.Label(viewer, wraplength=470)
+        self.selection_caption.pack(fill="x", pady=10)
 
+        bottom = ttk.Frame(self.frames_tab)
+        bottom.pack(side="bottom", fill="x", pady=(12, 0))
+        self._button(bottom, "Înapoi la sursă", lambda: self.tabs.select(self.source_tab)).pack(side="left")
+        ttk.Label(bottom, textvariable=self.selection_var).pack(side="left", padx=18)
+        self.continue_button = self._primary(
+            bottom, "Selectează imagini pentru a continua",
+            lambda: self.tabs.select(self.config_tab),
+        )
+        self.continue_button.pack(side="right")
+        body.pack(fill="both", expand=True)
 
+    def _build_configuration_step(self):
+        self._heading(
+            self.config_tab, "Pregătește interpretarea",
+            "Verifică modelul, limba și contextul înainte să pornești analiza.",
+        )
+        # Zona centrală se poate derula inclusiv pe ecrane mai mici.
+        canvas = tk.Canvas(self.config_tab, highlightthickness=0)
+        scroll = ttk.Scrollbar(self.config_tab, orient="vertical", command=canvas.yview)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True)
+        canvas.configure(yscrollcommand=scroll.set)
+        content = ttk.Frame(canvas, padding=(0, 0, 14, 0))
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window, width=event.width))
+        self.config_canvas = canvas
+        self.root.bind("<MouseWheel>", self._configuration_wheel, add="+")
+
+        fields = ttk.Frame(content)
+        fields.pack(fill="x")
+        fields.columnconfigure(1, weight=1)
+        self._field(fields, 0, "Domeniul analizat", self.domain_var)
+        ttk.Label(fields, text="Limba descrierilor").grid(row=1, column=0, sticky="w")
+        language = ttk.Combobox(fields, textvariable=self.language_var, values=("Română", "Engleză"))
+        language.grid(row=1, column=1, sticky="ew", pady=6)
+        self.controls.append(language)
+        self._field(fields, 2, "Model", self.model_var)
+        ttk.Label(
+            #fields, text="Interfața de test folosește modele gratuite OpenRouter (:free).",
+            fields, text="Furnizor: Gemini API. Model exemplu: gemini-3.8-flash.",
+            style="StepHint.TLabel",
+        ).grid(row=3, column=1, sticky="w", pady=(0, 10))
+
+        self._field(fields, 4, "Imagini per apel (1-4)", self.batch_size_var)
+        ttk.Label(fields, text="Context comun; descriere separată pentru fiecare imagine.",
+                  style="StepHint.TLabel").grid(row=5, column=1, sticky="w")
+
+        use = ttk.Checkbutton(
+            content, text="Ghidează descrierea folosind o ontologie",
+            variable=self.use_ontology_var,
+        )
+        use.pack(anchor="w", pady=8)
+        self.controls.append(use)
+
+        self.ontology_panel = ttk.LabelFrame(content, text="Contextul ontologic", padding=12)
+        file_row = ttk.Frame(self.ontology_panel)
+        file_row.pack(fill="x")
+        self._button(file_row, "Încarcă ontologia…", self._choose_ontology).pack(side="left")
+        ttk.Label(
+            file_row, textvariable=self.ontology_file_var, wraplength=650,
+        ).pack(side="left", padx=12)
+        ns_row = ttk.Frame(self.ontology_panel)
+        ns_row.pack(fill="x", pady=8)
+        ns_row.columnconfigure(1, weight=1)
+        ttk.Label(ns_row, text="Namespace propriu").grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.namespace_combo = ttk.Combobox(ns_row, textvariable=self.namespace_var)
+        self.namespace_combo.grid(row=0, column=1, sticky="ew")
+        self.controls.append(self.namespace_combo)
+        ttk.Label(
+            self.ontology_panel, text="Prefixul IRI al termenilor proprii; verifică valoarea propusă.",
+            style="StepHint.TLabel",
+        ).pack(anchor="w")
+        format_row = ttk.Frame(self.ontology_panel)
+        format_row.pack(fill="x", pady=8)
+        ttk.Label(format_row, text="Formatul fișierului").pack(side="left")
+        self.format_combo = ttk.Combobox(
+            format_row, textvariable=self.ontology_format_var, width=18,
+            values=("După extensie", "RDF/XML", "Turtle", "N-Triples"), state="readonly",
+        )
+        self.format_combo.pack(side="left", padx=12)
+        self.controls.append(self.format_combo)
+        self.generate_context_button = self._button(
+            format_row, "Pregătește contextul", self._generate_context
+        )
+        self.generate_context_button.pack(side="right")
+        ttk.Label(
+            self.ontology_panel, textvariable=self.context_status_var, wraplength=850,
+        ).pack(anchor="w", pady=6)
+        self.context_details_button = self._button(
+            self.ontology_panel, "▸ Vezi contextul și detaliile", self._toggle_context_details
+        )
+        self.context_details_button.pack(anchor="w")
+        self.context_details_panel = ttk.Frame(self.ontology_panel)
+        details = ttk.Notebook(self.context_details_panel)
+        details.pack(fill="both", expand=True)
+        turtle_tab, report_tab = ttk.Frame(details), ttk.Frame(details)
+        details.add(turtle_tab, text="Context Turtle")
+        details.add(report_tab, text="Raport")
+        self.context_widget = self._text(turtle_tab)
+        self.context_widget.configure(height=8)
+        self.ontology_widget = self._text(report_tab)
+        self.ontology_widget.configure(height=8)
+        self.export_context_button = self._button(
+            self.context_details_panel, "Exportă contextul Turtle…", self._export_context
+        )
+        self.export_context_button.pack(anchor="e", pady=(6, 0))
+
+        self.config_summary = ttk.Label(content, textvariable=self.summary_var, wraplength=900)
+        self.config_summary.pack(anchor="w", pady=(18, 5))
+        ttk.Label(
+            content, textvariable=self.readiness_var, wraplength=900, style="StepHint.TLabel",
+        ).pack(anchor="w", pady=(0, 12))
+        actions = ttk.Frame(content)
+        actions.pack(fill="x", pady=(0, 12))
+        self._button(
+            actions, "Înapoi la selecție", lambda: self.tabs.select(self.frames_tab)
+        ).pack(side="left")
+        self.describe_button = self._primary(actions, "Descrie imaginile", self._describe)
+        self.describe_button.pack(side="right")
+
+    def _build_results_step(self):
+        self._heading(
+            self.results_tab, "Examinează rezultatele",
+            "Alege o imagine din listă pentru a vedea descrierea și datele asociate.",
+        )
+        body = ttk.Frame(self.results_tab)
+        body.columnconfigure(0, weight=1, minsize=270)
+        body.columnconfigure(1, weight=3, minsize=500)
+        body.rowconfigure(0, weight=1)
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        self.result_tree = ttk.Treeview(
+            left, columns=("status",), show="tree headings", selectmode="browse", height=12
+        )
+        self.result_tree.heading("#0", text="Imagine")
+        self.result_tree.heading("status", text="Stare")
+        self.result_tree.column("#0", width=180, minwidth=120)
+        self.result_tree.column("status", width=95, minwidth=75, stretch=False)
+        tree_scroll = ttk.Scrollbar(left, orient="vertical", command=self.result_tree.yview)
+        tree_scroll.pack(side="right", fill="y")
+        self.result_tree.pack(fill="both", expand=True)
+        self.result_tree.configure(yscrollcommand=tree_scroll.set)
+        self.result_tree.bind("<<TreeviewSelect>>", self._result_selected)
+        viewer = ttk.Frame(body)
+        viewer.grid(row=0, column=1, sticky="nsew")
         self.picture = ttk.Label(
-            viewer,
-            text="Selectează un cadru.",
-            anchor="center",
+            viewer, text="Rezultatele vor apărea după pornirea analizei din pasul 3.",
+            anchor="center", wraplength=600,
         )
         self.picture.pack(fill="x")
-
-        self.caption = ttk.Label(viewer, wraplength=650)
-        self.caption.pack(fill="x", pady=5)
-
+        self.caption = ttk.Label(viewer, wraplength=620)
+        self.caption.pack(fill="x", pady=6)
         result_tabs = ttk.Notebook(viewer)
         result_tabs.pack(fill="both", expand=True)
-
-        observation_tab = ttk.Frame(result_tabs)
-        json_tab = ttk.Frame(result_tabs)
-
-        result_tabs.add(observation_tab, text="Observație")
+        observation_tab, json_tab = ttk.Frame(result_tabs), ttk.Frame(result_tabs)
+        result_tabs.add(observation_tab, text="Descriere")
         result_tabs.add(json_tab, text="JSON-LD")
-
         self.observation_widget = self._text(observation_tab)
         self.json_widget = self._text(json_tab)
 
-        settings = ttk.Frame(tab)
-        settings.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            pady=(10, 0),
-        )
-
-        ttk.Label(settings, text="Model:").pack(side="left")
-
-        self._entry(
-            settings, self.model_var, 45
-        ).pack(side="left", padx=8)
-
-        self.describe_button = self._button(
-            settings,
-            "Descrie selecția",
-            self._describe,
-        )
-        self.describe_button.pack(side="left")
-
+        options = ttk.Frame(self.results_tab)
         regenerate = ttk.Checkbutton(
-            settings,
-            text="Regenerează descrierile existente",
+            options, text="Regenerează și descrierile existente la următoarea analiză",
             variable=self.regenerate_var,
         )
-        regenerate.pack(side="left", padx=8)
+        regenerate.pack(side="left")
         self.controls.append(regenerate)
-
-        ttk.Label(
-            tab,
-            text=(
-                f"Domeniu configurat în cod: "
-                f"{TEST_DOMAIN or 'fără domeniu'}"
-                + (
-                    " | Lipsește OPENROUTER_API_KEY din mediu."
-                    if not self.api_key.strip()
-                    else ""
-                )
-            ),
-            wraplength=1100,
-        ).grid(
-            row=2,
-            column=0,
-            columnspan=2,
-            sticky="w",
-            pady=6,
-        )
-
-        # Ontologia este încărcată independent de VLM.
+        actions = ttk.Frame(self.results_tab)
+        actions.pack(side="bottom", fill="x", pady=(8, 0))
+        options.pack(side="bottom", fill="x", pady=(12, 0))
         self._button(
-            ontology_tab,
-            "Încarcă ontologia…",
-            self._choose_ontology,
-        ).pack(anchor="w")
-
-        ttk.Label(
-            ontology_tab,
-            text=(
-                "Încărcarea ontologiei este independentă de descriere. "
-                "Maparea nu este încă implementată."
-            ),
-            wraplength=1000,
-        ).pack(anchor="w", pady=10)
-
-        self.ontology_widget = self._text(ontology_tab)
-
-        footer = ttk.Frame(main)
-        footer.pack(fill="x", pady=(10, 0))
-
-        self.save_button = self._button(
-            footer,
-            "Salvează sesiunea JSON-LD…",
-            self._save,
+            actions, "Configurează o nouă analiză", lambda: self.tabs.select(self.config_tab)
+        ).pack(side="left")
+        self.results_save_button = self._primary(
+            actions, "Salvează rezultatele…", self._save
         )
-        self.save_button.pack(side="left")
+        self.results_save_button.pack(side="right")
+        body.pack(fill="both", expand=True)
 
-        self.cancel_button = ttk.Button(
-            footer,
-            text="Anulează procesarea",
-            command=self._cancel,
-        )
-        self.cancel_button.pack(side="left", padx=8)
+    def _show_source_mode(self):
+        self.video_panel.pack_forget()
+        self.images_panel.pack_forget()
+        panel = self.video_panel if self.source_mode.get() == "video" else self.images_panel
+        panel.pack(fill="x")
 
-        self.progress = ttk.Progressbar(footer, maximum=100)
-        self.progress.pack(
-            side="right",
-            fill="x",
-            expand=True,
-            padx=(20, 0),
+    def _configuration_wheel(self, event):
+        widget = event.widget
+        if isinstance(widget, (tk.Text, ttk.Combobox)):
+            return
+        while widget is not None and widget is not self.config_tab:
+            widget = getattr(widget, "master", None)
+        if widget is self.config_tab and event.delta:
+            if self.config_canvas.yview() != (0.0, 1.0):
+                units = -int(event.delta / 120) or (-1 if event.delta > 0 else 1)
+                self.config_canvas.yview_scroll(units, "units")
+                return "break"
+
+    def _toggle_advanced(self):
+        self.advanced_open = not self.advanced_open
+        if self.advanced_open:
+            self.advanced_panel.pack(fill="x", before=self.extract_button)
+        else:
+            self.advanced_panel.pack_forget()
+        self.advanced_button.configure(
+            text=("▾" if self.advanced_open else "▸") + " Setări avansate de extragere"
         )
 
-        ttk.Label(
-            main,
-            textvariable=self.status_var,
-            wraplength=1150,
-        ).pack(fill="x", pady=(7, 0))
+    def _toggle_context_details(self):
+        self.context_details_open = not self.context_details_open
+        if self.context_details_open:
+            self.context_details_panel.pack(fill="both", expand=True, pady=(8, 0))
+        else:
+            self.context_details_panel.pack_forget()
+        self.context_details_button.configure(
+            text=("▾" if self.context_details_open else "▸") + " Vezi contextul și detaliile"
+        )
+
+    def _result_selected(self, event=None):
+        ids = self.result_tree.selection()
+        if ids and ids[0] in self.frames_by_id and ids[0] != self.active_frame_id:
+            self._show_frame(ids[0])
+
+    def _language(self):
+        value = self.language_var.get().strip()
+        return {"Română": "Romanian", "Engleză": "English"}.get(value, value)
+
+    def _rdf_format(self):
+        return {
+            "RDF/XML": "xml", "Turtle": "turtle", "N-Triples": "nt",
+        }.get(self.ontology_format_var.get())
+
+    def _settings_changed(self, *args):
+        if self.session is not None:
+            self.dirty = True
+        self._sync_controls()
+
+    def _invalidate_context(self, *args):
+        self.ontology_context = None
+        self.context_status_var.set("Context nepregătit. Alege fișierul și namespace-ul.")
+        self._set_text(self.context_widget, "Pregătește contextul pentru previzualizare.")
+        self._set_text(self.ontology_widget, "")
+        self._settings_changed()
+
+    def _capture_settings(self):
+        context = self.ontology_context
+        return InterpretationSettings(
+            model=self.model_var.get().strip(),
+            language=self._language(),
+            domain_context=self.domain_var.get().strip(),
+            use_ontology=self.use_ontology_var.get(),
+            namespace=self.namespace_var.get().strip(),
+            rdf_format=self._rdf_format(),
+            context_turtle=context.turtle if context else "",
+            context_report=json.loads(json.dumps(context.report)) if context else {},
+        )
+
+    def _with_settings(self, session):
+        return WorkflowSession.model_validate({
+            **session.model_dump(),
+            "schema_version": "2.2",
+            "ontology_path": self.ontology_path,
+            "interpretation_settings": self._capture_settings(),
+        })
+
+    def _description_blocker(self):
+        if self.busy:
+            return "O operație este în desfășurare. Așteaptă finalizarea ei."
+        if self.session is None:
+            return "Încarcă un video sau imagini în pasul 1."
+        if not any(state.selected for state in self.session.frames):
+            return "Selectează cel puțin o imagine în pasul 2."
+
+        if not self.api_key.strip():
+            return (
+                "Lipsește cheia Gemini. Configurează GEMINI_API_KEY "
+                "și repornește aplicația."
+            )
+        if not self.model_var.get().strip():
+            return "Completează identificatorul modelului Gemini."
+
+        """
+        if not self.api_key.strip():
+            return "Lipsește cheia OpenRouter. Configurează OPENROUTER_API_KEY și repornește aplicația."
+        if not self.model_var.get().strip().endswith(":free"):
+            return "Alege un model gratuit cu identificator terminat în :free."
+        """
+
+
+        if not self._language():
+            return "Completează limba descrierilor."
+        if self.use_ontology_var.get() and self.ontology_context is None:
+            return "Pregătește contextul ontologic sau dezactivează folosirea lui."
+        return ""
 
     def _sync_controls(self):
         for control in self.controls:
-            control.configure(
-                state="disabled" if self.busy else "normal"
-            )
-
-        selected = bool(
-            self.session
-            and any(s.selected for s in self.session.frames)
+            control.configure(state="disabled" if self.busy else "normal")
+        self.format_combo.configure(state="disabled" if self.busy else "readonly")
+        count = sum(state.selected for state in self.session.frames) if self.session else 0
+        self.continue_button.configure(
+            state="normal" if count and not self.busy else "disabled",
+            text=f"Continuă cu {count} imagini" if count else "Selectează imagini pentru a continua",
         )
+        if self.use_ontology_var.get():
+            if not self.ontology_panel.winfo_manager():
+                self.ontology_panel.pack(fill="x", before=self.config_summary, pady=8)
+        else:
+            self.ontology_panel.pack_forget()
 
+        blocker = self._description_blocker()
         self.describe_button.configure(
-            state=(
-                "normal"
-                if not self.busy and selected and self.api_key.strip()
-                else "disabled"
-            )
+            state="disabled" if blocker else "normal",
+            text=f"Descrie cele {count} imagini",
         )
-
-        self.save_button.configure(
-            state=(
-                "normal"
-                if not self.busy and self.session
-                else "disabled"
+        existing = sum(
+            state.selected and state.observation is not None
+            for state in self.session.frames
+        ) if self.session else 0
+        ready_text = "Pregătit pentru analiză."
+        if existing and not self.regenerate_var.get():
+            ready_text += (
+                f" {existing} descrieri existente vor fi păstrate. "
+                "Pentru refacere, activează regenerarea în pasul 4."
             )
+        elif existing:
+            ready_text += f" Vor fi regenerate și {existing} descrieri existente."
+        self.readiness_var.set(blocker or ready_text)
+        context_label = (
+            "Context ontologic activ" if self.ontology_context else "Context de pregătit"
+        ) if self.use_ontology_var.get() else "Fără context ontologic"
+        self.summary_var.set(
+            f"{count} imagini selectate · {self.model_var.get().strip()} · "
+            f"{self.language_var.get().strip()} · {context_label}"
         )
-
+        save_state = "normal" if self.session and not self.busy else "disabled"
+        self.save_button.configure(state=save_state)
+        self.results_save_button.configure(state=save_state)
+        self.generate_context_button.configure(
+            state="normal" if not self.busy and self.ontology_path
+            and self.namespace_var.get().strip() else "disabled"
+        )
+        self.export_context_button.configure(
+            state="normal" if not self.busy and self.ontology_context else "disabled"
+        )
         self.cancel_button.configure(
-            state=(
-                "normal"
-                if self.busy in {"extraction", "description"}
-                and not self.cancel_event.is_set()
-                else "disabled"
-            )
+            state="normal" if self.busy in {"extraction", "description"}
+            and not self.cancel_event.is_set() else "disabled"
+        )
+        self.gallery.set_enabled(not self.busy)
+
+    def _generate_context(self):
+        if self.busy or self.ontology_path is None:
+            return
+        path = self.ontology_path
+        namespace = self.namespace_var.get().strip()
+        rdf_format = self._rdf_format()
+        self._invalidate_context()
+        self.context_status_var.set("Se pregătește contextul…")
+        self.status_var.set("Se extrage vocabularul ontologiei, local…")
+        self._launch(
+            "context",
+            lambda cancel, emit: build_ontology_context(path, namespace, rdf_format=rdf_format),
         )
 
-        self.gallery.set_enabled(not self.busy)
+    def _export_context(self):
+        if self.busy or self.ontology_context is None:
+            return
+        filename = filedialog.asksaveasfilename(
+            parent=self.root, title="Exportă contextul Turtle",
+            initialfile="context.ttl", defaultextension=".ttl",
+            filetypes=[("Turtle", "*.ttl")],
+        )
+        if not filename:
+            return
+        try:
+            destination = Path(filename).resolve()
+            protected = {self.ontology_path.resolve()} if self.ontology_path else set()
+            if self.session:
+                protected.update(
+                    get_frame_path(self.session, frame.frame_id, must_exist=False)
+                    for frame in self.session.keyframes
+                )
+                if self.session.extraction:
+                    protected.add(self.session.extraction.input_video.resolve())
+                    protected.add(self.session.extraction.manifest.resolve())
+            if destination in protected:
+                raise ValueError("Alege o destinație diferită de fișierele sursă.")
+            destination.write_text(self.ontology_context.turtle, encoding="utf-8")
+            self.status_var.set(f"Context exportat: {destination}")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Export nereușit", str(exc), parent=self.root)
 
     def _choose_video(self):
         path = filedialog.askopenfilename(
@@ -539,6 +825,8 @@ class WorkflowGUI:
         threading.Thread(target=work, daemon=False).start()
 
     def _extract(self):
+        if self.busy:
+            return
         try:
             if (
                 not self.video_var.get().strip()
@@ -717,6 +1005,12 @@ class WorkflowGUI:
             for frame in self.session.keyframes
         ]
 
+        self.selection_preview_photo = None
+        self.selection_picture.configure(image="", text="Apasă pe o miniatură.")
+        self.selection_caption.configure(text="")
+        self.result_tree.delete(*self.result_tree.get_children())
+        for item in items:
+            self.result_tree.insert("", "end", iid=item["id"], text=item["title"], values=(item["status"],))
         self.gallery.set_frames(items, selected)
         self.gallery.set_enabled(not self.busy)
 
@@ -737,12 +1031,16 @@ class WorkflowGUI:
             if state.frame_id == frame_id
         )
 
-        self.gallery.set_status(
-            frame_id,
-            STATUS_LABELS[state.description_status],
-        )
+        label = STATUS_LABELS[state.description_status]
+        self.gallery.set_status(frame_id, label)
+        self.result_tree.item(frame_id, values=(label,))
 
     def _show_frame(self, frame_id):
+        if frame_id not in self.frames_by_id:
+            return
+        if self.result_tree.selection() != (frame_id,):
+            self.result_tree.selection_set(frame_id)
+            self.result_tree.see(frame_id)
         self.active_frame_id = frame_id
         self.gallery.mark_active(frame_id)
 
@@ -761,8 +1059,12 @@ class WorkflowGUI:
                         "RGB"
                     )
 
+                selection_preview = preview.copy()
+                selection_preview.thumbnail((520, 390), Image.Resampling.LANCZOS)
+                self.selection_preview_photo = ImageTk.PhotoImage(selection_preview, master=self.root)
+                self.selection_picture.configure(image=self.selection_preview_photo, text="")
                 preview.thumbnail(
-                    (600, 260),
+                    (560, 240),
                     Image.Resampling.LANCZOS,
                 )
 
@@ -778,6 +1080,7 @@ class WorkflowGUI:
 
             except (OSError, ValueError) as exc:
                 self.preview_id = None
+                self.selection_picture.configure(image="", text=f"Imagine indisponibilă: {exc}")
                 self.picture.configure(
                     image="",
                     text=f"Imagine indisponibilă: {exc}",
@@ -799,6 +1102,7 @@ class WorkflowGUI:
             )
 
         self.caption.configure(text=caption)
+        self.selection_caption.configure(text=caption)
 
         text = (
             f"Stare: {STATUS_LABELS[state.description_status]}\n\n"
@@ -835,69 +1139,79 @@ class WorkflowGUI:
         self._set_text(self.json_widget, jsonld_text)
 
     def _describe(self):
-        if self.busy or self.session is None:
+        if self.busy:
             return
-
         try:
-            model = self.model_var.get().strip()
-
-            if not model.endswith(":free"):
-                raise ValueError(
-                    "Interfața de test acceptă doar modele :free."
-                )
-
+            blocker = self._description_blocker()
+            if blocker:
+                raise ValueError(blocker)
+            context = self.ontology_context if self.use_ontology_var.get() else None
+            if context:
+                source = Path(context.report["source_path"])
+                try:
+                    current_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+                except OSError as exc:
+                    self._invalidate_context()
+                    raise ValueError("Ontologia nu mai poate fi citită. Reîncarcă fișierul.") from exc
+                if current_hash != context.report["source_sha256"]:
+                    self._invalidate_context()
+                    raise ValueError("Ontologia s-a schimbat. Pregătește din nou contextul.")
+            batch_size = int(self.batch_size_var.get().strip())
+            if not 1 <= batch_size <= 4:
+                raise ValueError("Alege între 1 și 4 imagini per apel.")
             config = DescriptionConfig(
+                max_tokens=4096,
+                timeout_seconds=180.0,
                 api_key=self.api_key,
-                model=model,
-                language="English",
-                domain_context=TEST_DOMAIN,
+                model=self.model_var.get().strip(),
+                language=self._language(),
+                domain_context=self.domain_var.get().strip(),
+                ontology_context=context.turtle if context else "",
+                ontology_namespace=context.report["namespace"] if context else "",
+                ontology_source_sha256=context.report["source_sha256"] if context else "",
+                ontology_extraction_version=context.report["extraction_version"] if context else "",
             )
-
+            self.session = self._with_settings(self.session)
             snapshot = self.session
             regenerate = self.regenerate_var.get()
-
-            if not any(s.selected for s in snapshot.frames):
-                raise ValueError("Selectează cel puțin un cadru.")
-
-        except ValueError as exc:
-            messagebox.showerror(
-                "Configurare invalidă",
-                str(exc),
-                parent=self.root,
-            )
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Configurare invalidă", str(exc), parent=self.root)
             return
 
         def operation(cancel, emit):
-            describer = OpenRouterImageDescriber(config)
-
-            for event in describe_selected(
-                snapshot,
-                describer,
-                regenerate=regenerate,
-                cancel_event=cancel,
+            describer = GeminiBatchDescriber(config)
+            for event in describe_selected_batches(
+                snapshot, describer, batch_size=batch_size,
+                min_interval_seconds=13.0,
+                regenerate=regenerate, cancel_event=cancel
             ):
                 emit("description_progress", event)
 
+        self.tabs.select(self.results_tab)
+        first_selected = next(state for state in snapshot.frames if state.selected)
+        self._show_frame(first_selected.frame_id)
         self.status_var.set("Se pregătesc descrierile…")
         self._launch("description", operation)
 
     def _choose_ontology(self):
+        if self.busy:
+            return
         filename = filedialog.askopenfilename(
-            parent=self.root,
-            title="Alege ontologia",
-            filetypes=[
-                ("Ontologie", "*.rdf *.owl *.ttl *.n3 *.nt *.jsonld"),
-                ("Toate", "*.*"),
-            ],
+            parent=self.root, title="Alege ontologia",
+            filetypes=[("Ontologie", "*.rdf *.owl *.ttl *.nt"), ("Toate", "*.*")],
         )
-
         if filename:
             path = Path(filename).resolve()
+            rdf_format = self._rdf_format()
+            self.ontology_path = path
+            self.ontology_file_var.set(str(path))
+            self.namespace_combo.configure(values=())
+            self.namespace_var.set("")
+            self._invalidate_context()
             self.status_var.set("Se citește ontologia…")
-
             self._launch(
                 "ontology",
-                lambda cancel, emit: load_ontology(path),
+                lambda cancel, emit: load_ontology(path, rdf_format=rdf_format),
             )
 
     def _poll_events(self):
@@ -921,7 +1235,7 @@ class WorkflowGUI:
                         parent=self.root,
                     )
         finally:
-            self.root.after(100, self._poll_events)
+            self.poll_id = self.root.after(100, self._poll_events)
 
     def _handle_event(self, kind, value):
         if kind == "extraction_progress":
@@ -977,10 +1291,7 @@ class WorkflowGUI:
             if job == "extraction":
                 session = create_session(result)
 
-                self.session = WorkflowSession.model_validate({
-                    **session.model_dump(),
-                    "ontology_path": self.ontology_path,
-                })
+                self.session = self._with_settings(session)
 
                 self.dirty = True
                 self.regenerate_var.set(False)
@@ -1000,10 +1311,7 @@ class WorkflowGUI:
                 )
 
             elif job == "images":
-                self.session = WorkflowSession.model_validate({
-                    **result.model_dump(),
-                    "ontology_path": self.ontology_path,
-                })
+                self.session = self._with_settings(result)
 
                 self.dirty = True
                 self.regenerate_var.set(False)
@@ -1018,44 +1326,52 @@ class WorkflowGUI:
 
             elif job == "ontology":
                 self.ontology_path = Path(result.source)
-
-                if self.session:
-                    self.session = WorkflowSession.model_validate({
-                        **self.session.model_dump(),
-                        "ontology_path": self.ontology_path,
-                    })
-                    self.dirty = True
-
-                lines = [
-                    str(self.ontology_path),
-                    "",
-                    json.dumps(
-                        result.summary(),
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    "",
-                    "Previzualizare: primele 200 de concepte",
-                ]
-
-                lines += [
-                    f"{concept.preferred_label()} — {concept.iri}"
-                    for concept in result.concepts[:200]
-                ]
-
+                self.ontology_file_var.set(str(self.ontology_path))
+                candidates = Counter()
+                for concept in result.concepts:
+                    iri = concept.iri
+                    if "#" in iri:
+                        prefix = iri.rsplit("#", 1)[0] + "#"
+                    elif "/" in iri:
+                        prefix = iri.rsplit("/", 1)[0] + "/"
+                    else:
+                        continue
+                    if not prefix.startswith(("http://www.w3.org/", "https://www.w3.org/")):
+                        candidates[prefix] += 1
+                preferred = {
+                    iri.rstrip("#/") + suffix
+                    for iri in result.ontology_iris for suffix in ("#", "/")
+                }
+                suggestions = sorted(
+                    candidates, key=lambda ns: (ns not in preferred, -candidates[ns], ns)
+                )
+                self.namespace_combo.configure(values=suggestions)
+                self.namespace_var.set(suggestions[0] if suggestions else "")
                 self._set_text(
                     self.ontology_widget,
-                    "\n".join(lines),
+                    json.dumps(result.summary(), ensure_ascii=False, indent=2),
                 )
+                self.context_status_var.set("Verifică namespace-ul propus, apoi pregătește contextul.")
+                self.status_var.set("Ontologie încărcată. Contextul trebuie pregătit înainte de analiză.")
 
-                self.status_var.set(
-                    "Ontologie încărcată. "
-                    "Nu se execută inferență sau mapare; "
-                    "importurile externe nu sunt încărcate automat."
+            elif job == "context":
+                self.ontology_context = result
+                report = result.report
+                self.context_status_var.set(
+                    f"Context pregătit: {report['anchor_count']} concepte proprii · "
+                    f"{report['context_triples']} triplete · "
+                    f"{report['utf8_bytes'] / 1024:.1f} KB."
                 )
+                self._set_text(self.context_widget, result.turtle)
+                self._set_text(self.ontology_widget, json.dumps(report, ensure_ascii=False, indent=2))
+                if self.session:
+                    self.dirty = True
+                self.status_var.set("Context pregătit. Poți porni descrierea imaginilor.")
 
         elif kind == "error":
             self.status_var.set("Operația a eșuat.")
+            if self.busy in {"context", "ontology"}:
+                self.context_status_var.set("Pregătirea a eșuat. Verifică fișierul, formatul și namespace-ul.")
 
             messagebox.showerror(
                 "Procesare nereușită",
@@ -1100,75 +1416,24 @@ class WorkflowGUI:
         if not filename:
             return
 
-        temporary = None
-
         try:
-            destination = Path(filename).resolve()
-
-            if destination.suffix.lower() != ".jsonld":
-                raise ValueError("Folosește extensia .jsonld.")
-
-            protected = {
-                get_frame_path(
-                    self.session,
-                    frame.frame_id,
-                    must_exist=False,
-                )
-                for frame in self.session.keyframes
-            }
-
-            if self.session.extraction is not None:
-                protected.update({
-                    self.session.extraction.input_video.resolve(),
-                    self.session.extraction.manifest.resolve(),
-                })
-
-            if self.ontology_path:
-                protected.add(self.ontology_path.resolve())
-
-            if destination in protected:
-                raise ValueError(
-                    "Sesiunea nu poate înlocui fișierele sursă."
-                )
-
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=destination.parent,
-                prefix=".workflow_",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(
-                    json.dumps(
-                        session_to_jsonld(self.session),
-                        ensure_ascii=False,
-                        indent=2,
-                        allow_nan=False,
-                    )
-                    + "\n"
-                )
-
-            temporary.replace(destination)
-            self.dirty = False
-            self.status_var.set(
-                f"Sesiune salvată: {destination}"
+            self.session = self._with_settings(self.session)
+            destination = save_session_jsonld(
+                self.session,
+                filename,
             )
-
         except (OSError, ValueError) as exc:
             messagebox.showerror(
                 "Salvare nereușită",
                 str(exc),
                 parent=self.root,
             )
+            return
 
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        self.dirty = False
+        self.status_var.set(
+            f"Sesiune salvată: {destination}"
+        )
 
     def _close(self):
         if self.busy:
@@ -1188,6 +1453,7 @@ class WorkflowGUI:
         ):
             return
 
+        self.root.after_cancel(self.poll_id)
         self.root.destroy()
 
 

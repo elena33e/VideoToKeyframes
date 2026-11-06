@@ -2,10 +2,10 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from extraction.models import ExtractedFrame, ExtractionResult
 from interpretation.observations import FrameObservation
@@ -94,8 +94,21 @@ class ImportedFrame(WorkflowModel):
         return self
 
 
+class InterpretationSettings(WorkflowModel):
+    """Configurația curentă; observațiile păstrează separat ce au folosit."""
+
+    model: str = ""
+    language: str = ""
+    domain_context: str = ""
+    use_ontology: bool = False
+    namespace: str = ""
+    rdf_format: str | None = None
+    context_turtle: Annotated[str, StringConstraints(strip_whitespace=False)] = ""
+    context_report: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkflowSession(WorkflowModel):
-    schema_version: Literal["2.0", "2.1"] = "2.1"
+    schema_version: Literal["2.0", "2.1", "2.2"] = "2.2"
 
     session_id: NonEmptyText = Field(
         default_factory=lambda: uuid4().hex
@@ -108,8 +121,11 @@ class WorkflowSession(WorkflowModel):
     imported_frames: tuple[ImportedFrame, ...] = ()
     frames: tuple[KeyframeState, ...] = ()
 
-    # Independentă de descrierea imaginilor.
+    # Fișierul ales; activarea contextului este explicită în setări.
     ontology_path: Path | None = None
+    interpretation_settings: InterpretationSettings = Field(
+        default_factory=InterpretationSettings
+    )
 
     @property
     def keyframes(self) -> tuple[ExtractedFrame | ImportedFrame, ...]:
