@@ -96,7 +96,8 @@ class ImportedFrame(WorkflowModel):
 
 class InterpretationSettings(WorkflowModel):
     """Configurația curentă; observațiile păstrează separat ce au folosit."""
-
+    provider: str = ""
+    batch_size: int = Field(default=1, ge=1, le=4)
     model: str = ""
     language: str = ""
     domain_context: str = ""

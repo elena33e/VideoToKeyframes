@@ -18,8 +18,11 @@ from PIL import Image, ImageOps, ImageTk
 from extraction.keyframe_extractor import KatnaKeyframeExtractorService
 from extraction.pipeline import PipelineError, VideoProcessingPipeline
 from extraction.scene_detector import PySceneDetectorService
-from interpretation.describe import DescriptionConfig
-from interpretation.describe_batch import GeminiBatchDescriber
+from interpretation.config import InterpretationConfig
+from interpretation.service import BatchInterpretationService
+from interpretation.strategies.gemini import GeminiStrategy
+from interpretation.strategies.openrouter import OpenRouterStrategy
+from interpretation.strategies.openai import OpenAIStrategy
 from interpretation.ontology import load_ontology
 from interpretation.ontology_context import build_ontology_context
 from workflow.description_batch import describe_selected_batches
@@ -34,7 +37,6 @@ from gui.keyframe_gallery import KeyframeGallery
 from workflow.persistence import save_session_jsonld
 
 from interpretation.config import (
-    DEFAULT_MODEL,
     DEFAULT_LANGUAGE,
     DEFAULT_DOMAIN_CONTEXT,
 )
@@ -93,9 +95,25 @@ def observation_text(result):
 
 
 class WorkflowGUI:
-    def __init__(self, root, *, api_key, model, output_dir):
+    def __init__(
+        self,
+        root,
+        *,
+        api_keys,
+        model_defaults,
+        initial_provider,
+        output_dir,
+    ):
         self.root = root
-        self.api_key = api_key
+
+        if initial_provider not in {"gemini", "openrouter", "openai"}:
+            raise ValueError(
+                f"Furnizor necunoscut: {initial_provider}"
+            )
+
+        self.api_keys = dict(api_keys)
+        self._models = dict(model_defaults)
+        self._active_provider = initial_provider
 
         self.session = None
         self.ontology_path = None
@@ -123,7 +141,11 @@ class WorkflowGUI:
         self.workers_var = tk.StringVar(
             value=str(min(2, os.cpu_count() or 1))
         )
-        self.model_var = tk.StringVar(value=model or DEFAULT_MODEL)
+        self.provider_var = tk.StringVar(value=initial_provider)
+
+        self.model_var = tk.StringVar(
+            value=self._models.get(initial_provider, "")
+        )
         self.batch_size_var = tk.StringVar(value="3")
         self.regenerate_var = tk.BooleanVar(value=False)
         self.source_mode = tk.StringVar(value="video")
@@ -152,10 +174,19 @@ class WorkflowGUI:
         for variable in (self.namespace_var, self.ontology_format_var):
             variable.trace_add("write", self._invalidate_context)
         for variable in (
-            self.model_var, self.language_var, self.domain_var,
-            self.use_ontology_var, self.regenerate_var,
+                self.model_var,
+                self.language_var,
+                self.domain_var,
+                self.batch_size_var,
+                self.use_ontology_var,
+                self.regenerate_var,
         ):
             variable.trace_add("write", self._settings_changed)
+
+        self.provider_var.trace_add(
+            "write",
+            self._provider_changed,
+        )
         self._sync_controls()
 
         root.protocol("WM_DELETE_WINDOW", self._close)
@@ -336,7 +367,9 @@ class WorkflowGUI:
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         self.gallery = KeyframeGallery(
-            left, on_selection=self._selection_changed, on_preview=self._show_frame
+            left,
+            on_selection=self._selection_changed,
+            on_preview=self._show_selection_frame,
         )
         self.gallery.grid(row=0, column=0, sticky="nsew")
         selection = ttk.Frame(left)
@@ -392,16 +425,54 @@ class WorkflowGUI:
         language = ttk.Combobox(fields, textvariable=self.language_var, values=("Română", "Engleză"))
         language.grid(row=1, column=1, sticky="ew", pady=6)
         self.controls.append(language)
-        self._field(fields, 2, "Model", self.model_var)
         ttk.Label(
-            #fields, text="Interfața de test folosește modele gratuite OpenRouter (:free).",
-            fields, text="Furnizor: Gemini API. Model exemplu: gemini-3.8-flash.",
-            style="StepHint.TLabel",
-        ).grid(row=3, column=1, sticky="w", pady=(0, 10))
+            fields,
+            text="Furnizor",
+        ).grid(row=2, column=0, sticky="w")
 
-        self._field(fields, 4, "Imagini per apel (1-4)", self.batch_size_var)
-        ttk.Label(fields, text="Context comun; descriere separată pentru fiecare imagine.",
-                  style="StepHint.TLabel").grid(row=5, column=1, sticky="w")
+        self.provider_combo = ttk.Combobox(
+            fields,
+            textvariable=self.provider_var,
+            values=("openrouter", "gemini", "openai"),
+            state="readonly",
+        )
+        self.provider_combo.grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            pady=6,
+        )
+        self.controls.append(self.provider_combo)
+
+        self._field(fields, 3, "Model", self.model_var)
+
+        ttk.Label(
+            fields,
+            text="Imagini per apel",
+        ).grid(row=4, column=0, sticky="w")
+
+        self.batch_size_combo = ttk.Combobox(
+            fields,
+            textvariable=self.batch_size_var,
+            values=("1", "2", "3", "4"),
+            state="readonly",
+        )
+        self.batch_size_combo.grid(
+            row=4,
+            column=1,
+            sticky="ew",
+            pady=6,
+        )
+        self.controls.append(self.batch_size_combo)
+
+        ttk.Label(
+            fields,
+            text=(
+                "Context comun; descriere separată pentru "
+                "fiecare imagine."
+            ),
+            style="StepHint.TLabel",
+        ).grid(row=5, column=1, sticky="w")
 
         use = ttk.Checkbutton(
             content, text="Ghidează descrierea folosind o ontologie",
@@ -592,6 +663,27 @@ class WorkflowGUI:
             self.dirty = True
         self._sync_controls()
 
+    def _provider_changed(self, *args):
+        provider = self.provider_var.get()
+
+        if provider not in {"gemini", "openrouter", "openai"}:
+            self._settings_changed()
+            return
+
+        if provider != self._active_provider:
+            # Reținem ultimul model introdus pentru furnizorul anterior.
+            self._models[self._active_provider] = (
+                self.model_var.get().strip()
+            )
+
+            self._active_provider = provider
+
+            self.model_var.set(
+                self._models.get(provider, "")
+            )
+
+        self._settings_changed()
+
     def _invalidate_context(self, *args):
         self.ontology_context = None
         self.context_status_var.set("Context nepregătit. Alege fișierul și namespace-ul.")
@@ -602,6 +694,8 @@ class WorkflowGUI:
     def _capture_settings(self):
         context = self.ontology_context
         return InterpretationSettings(
+            provider=self.provider_var.get(),
+            batch_size=int(self.batch_size_var.get()),
             model=self.model_var.get().strip(),
             language=self._language(),
             domain_context=self.domain_var.get().strip(),
@@ -622,37 +716,67 @@ class WorkflowGUI:
 
     def _description_blocker(self):
         if self.busy:
-            return "O operație este în desfășurare. Așteaptă finalizarea ei."
+            return "O operație este în desfășurare."
+
         if self.session is None:
             return "Încarcă un video sau imagini în pasul 1."
-        if not any(state.selected for state in self.session.frames):
+
+        if not any(
+                state.selected for state in self.session.frames
+        ):
             return "Selectează cel puțin o imagine în pasul 2."
 
-        if not self.api_key.strip():
+        provider = self.provider_var.get()
+
+        key_names = {
+            "gemini": "GEMINI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }
+
+        if provider not in key_names:
+            return "Selectează un furnizor valid."
+
+        if not self.api_keys.get(provider, "").strip():
             return (
-                "Lipsește cheia Gemini. Configurează GEMINI_API_KEY "
+                f"Lipsește cheia pentru {provider}. "
+                f"Configurează {key_names[provider]} "
                 "și repornește aplicația."
             )
+
         if not self.model_var.get().strip():
-            return "Completează identificatorul modelului Gemini."
+            return "Completează identificatorul modelului."
 
-        """
-        if not self.api_key.strip():
-            return "Lipsește cheia OpenRouter. Configurează OPENROUTER_API_KEY și repornește aplicația."
-        if not self.model_var.get().strip().endswith(":free"):
-            return "Alege un model gratuit cu identificator terminat în :free."
-        """
+        try:
+            batch_size = int(self.batch_size_var.get())
+        except ValueError:
+            return "Alege un număr valid de imagini per apel."
 
+        if not 1 <= batch_size <= 4:
+            return "Alege între 1 și 4 imagini per apel."
 
         if not self._language():
             return "Completează limba descrierilor."
-        if self.use_ontology_var.get() and self.ontology_context is None:
-            return "Pregătește contextul ontologic sau dezactivează folosirea lui."
+
+        if (
+                self.use_ontology_var.get()
+                and self.ontology_context is None
+        ):
+            return (
+                "Pregătește contextul ontologic "
+                "sau dezactivează folosirea lui."
+            )
+
         return ""
 
     def _sync_controls(self):
         for control in self.controls:
             control.configure(state="disabled" if self.busy else "normal")
+
+        selection_state = "disabled" if self.busy else "readonly"
+
+        self.provider_combo.configure(state=selection_state)
+        self.batch_size_combo.configure(state=selection_state)
         self.format_combo.configure(state="disabled" if self.busy else "readonly")
         count = sum(state.selected for state in self.session.frames) if self.session else 0
         self.continue_button.configure(
@@ -954,6 +1078,7 @@ class WorkflowGUI:
         self.selection_var.set(
             f"{len(ids)} / {len(self.session.frames)} cadre selectate"
         )
+        self._refresh_result_list()
         self._sync_controls()
 
     def _populate_frames(self):
@@ -1009,8 +1134,6 @@ class WorkflowGUI:
         self.selection_picture.configure(image="", text="Apasă pe o miniatură.")
         self.selection_caption.configure(text="")
         self.result_tree.delete(*self.result_tree.get_children())
-        for item in items:
-            self.result_tree.insert("", "end", iid=item["id"], text=item["title"], values=(item["status"],))
         self.gallery.set_frames(items, selected)
         self.gallery.set_enabled(not self.busy)
 
@@ -1020,9 +1143,138 @@ class WorkflowGUI:
         )
 
         if self.session.keyframes:
-            self._show_frame(
+            self._show_selection_frame(
                 self.session.keyframes[0].frame_id
             )
+
+        self._refresh_result_list()
+
+    def _refresh_result_list(self):
+        """Afișează numai cadrele selectate, fără să modifice observațiile."""
+        states = {
+            state.frame_id: state
+            for state in self.session.frames
+        } if self.session else {}
+
+        visible_ids = [
+            frame.frame_id
+            for frame in self.session.keyframes
+            if states[frame.frame_id].selected
+        ] if self.session else []
+
+        visible = set(visible_ids)
+
+        # Eliminăm doar rândurile afișate, nu datele din sesiune.
+        for frame_id in self.result_tree.get_children():
+            if frame_id not in visible:
+                self.result_tree.delete(frame_id)
+
+        for index, frame_id in enumerate(visible_ids):
+            frame = self.frames_by_id[frame_id]
+
+            title = (
+                f"Scena {frame.scene_index} · {frame.image_path.name}"
+                if frame.scene_index is not None
+                else frame.image_path.name
+            )
+
+            values = (
+                STATUS_LABELS[states[frame_id].description_status],
+            )
+
+            if self.result_tree.exists(frame_id):
+                self.result_tree.item(
+                    frame_id,
+                    text=title,
+                    values=values,
+                )
+                self.result_tree.move(frame_id, "", index)
+            else:
+                self.result_tree.insert(
+                    "",
+                    index,
+                    iid=frame_id,
+                    text=title,
+                    values=values,
+                )
+
+        if visible_ids:
+            target = (
+                self.active_frame_id
+                if self.active_frame_id in visible
+                else visible_ids[0]
+            )
+            self._show_frame(target)
+        else:
+            self.active_frame_id = None
+            self.preview_id = None
+            self.preview_photo = None
+
+            self.result_tree.focus("")
+            self.picture.configure(
+                image="",
+                text="Selectează imagini în pasul 2 pentru a le vedea aici.",
+            )
+            self.caption.configure(text="")
+            self._set_text(self.observation_widget, "")
+            self._set_text(self.json_widget, "")
+
+    def _show_selection_frame(self, frame_id):
+        """Previzualizează orice cadru în pasul 2, independent de rezultate."""
+        if frame_id not in self.frames_by_id:
+            return
+
+        self.gallery.mark_active(frame_id)
+
+        # _show_frame actualizează și previzualizarea din pasul 2.
+        # Invalidăm cache-ul pentru revenirea ulterioară la acel cadru.
+        self.preview_id = None
+
+        frame = self.frames_by_id[frame_id]
+
+        try:
+            path = get_frame_path(self.session, frame_id)
+
+            with Image.open(path) as source:
+                preview = ImageOps.exif_transpose(source).convert("RGB")
+
+            preview.thumbnail(
+                (520, 390),
+                Image.Resampling.LANCZOS,
+            )
+
+            self.selection_preview_photo = ImageTk.PhotoImage(
+                preview,
+                master=self.root,
+            )
+            self.selection_picture.configure(
+                image=self.selection_preview_photo,
+                text="",
+            )
+
+        except (OSError, ValueError) as exc:
+            self.selection_preview_photo = None
+            self.selection_picture.configure(
+                image="",
+                text=f"Imagine indisponibilă: {exc}",
+            )
+
+        if self.session.extraction is None:
+            caption = (
+                f"{frame.image_path.name} | Imagine încărcată direct."
+            )
+        else:
+            scene = next(
+                s for s in self.session.extraction.scenes
+                if s.index == frame.scene_index
+            )
+            caption = (
+                f"{frame.image_path.name} | Scena {scene.index}: "
+                f"{scene.start_seconds:.2f}–{scene.end_seconds:.2f} s. "
+                "Intervalul este al scenei, nu timestamp-ul cadrului."
+            )
+
+        self.selection_caption.configure(text=caption)
 
     def _update_row(self, frame_id):
         state = next(
@@ -1033,10 +1285,14 @@ class WorkflowGUI:
 
         label = STATUS_LABELS[state.description_status]
         self.gallery.set_status(frame_id, label)
-        self.result_tree.item(frame_id, values=(label,))
+        if self.result_tree.exists(frame_id):
+            self.result_tree.item(frame_id, values=(label,))
 
     def _show_frame(self, frame_id):
-        if frame_id not in self.frames_by_id:
+        if (
+                frame_id not in self.frames_by_id
+                or not self.result_tree.exists(frame_id)
+        ):
             return
         if self.result_tree.selection() != (frame_id,):
             self.result_tree.selection_set(frame_id)
@@ -1141,56 +1397,141 @@ class WorkflowGUI:
     def _describe(self):
         if self.busy:
             return
+
         try:
             blocker = self._description_blocker()
+
             if blocker:
                 raise ValueError(blocker)
-            context = self.ontology_context if self.use_ontology_var.get() else None
+
+            context = (
+                self.ontology_context
+                if self.use_ontology_var.get()
+                else None
+            )
+
             if context:
                 source = Path(context.report["source_path"])
+
                 try:
-                    current_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+                    current_hash = hashlib.sha256(
+                        source.read_bytes()
+                    ).hexdigest()
+
                 except OSError as exc:
                     self._invalidate_context()
-                    raise ValueError("Ontologia nu mai poate fi citită. Reîncarcă fișierul.") from exc
+
+                    raise ValueError(
+                        "Ontologia nu mai poate fi citită. "
+                        "Reîncarcă fișierul."
+                    ) from exc
+
                 if current_hash != context.report["source_sha256"]:
                     self._invalidate_context()
-                    raise ValueError("Ontologia s-a schimbat. Pregătește din nou contextul.")
-            batch_size = int(self.batch_size_var.get().strip())
-            if not 1 <= batch_size <= 4:
-                raise ValueError("Alege între 1 și 4 imagini per apel.")
-            config = DescriptionConfig(
-                max_tokens=4096,
-                timeout_seconds=180.0,
-                api_key=self.api_key,
-                model=self.model_var.get().strip(),
+
+                    raise ValueError(
+                        "Ontologia s-a schimbat. "
+                        "Pregătește din nou contextul."
+                    )
+
+            provider = self.provider_var.get()
+            model = self.model_var.get().strip()
+            api_key = self.api_keys[provider].strip()
+            batch_size = int(self.batch_size_var.get())
+
+            config = InterpretationConfig(
                 language=self._language(),
                 domain_context=self.domain_var.get().strip(),
-                ontology_context=context.turtle if context else "",
-                ontology_namespace=context.report["namespace"] if context else "",
-                ontology_source_sha256=context.report["source_sha256"] if context else "",
-                ontology_extraction_version=context.report["extraction_version"] if context else "",
+                max_output_tokens_per_image=4096,
+                ontology_context=(
+                    context.turtle if context else ""
+                ),
+                ontology_namespace=(
+                    context.report["namespace"]
+                    if context else ""
+                ),
+                ontology_source_sha256=(
+                    context.report["source_sha256"]
+                    if context else ""
+                ),
+                ontology_extraction_version=(
+                    context.report["extraction_version"]
+                    if context else ""
+                ),
             )
+
+            # Clientul alege explicit strategia.
+            if provider == "gemini":
+                strategy = GeminiStrategy(
+                    api_key=api_key,
+                    model=model,
+                    timeout_seconds=180.0,
+                )
+
+            elif provider == "openrouter":
+                strategy = OpenRouterStrategy(
+                    api_key=api_key,
+                    model=model,
+                    timeout_seconds=180.0,
+                )
+
+            elif provider == "openai":
+                strategy = OpenAIStrategy(
+                    api_key=api_key,
+                    model=model,
+                    timeout_seconds=180.0,
+                    reasoning_effort="low",
+                )
+
+            else:
+                raise ValueError(
+                    f"Furnizor necunoscut: {provider}"
+                )
+
+            service = BatchInterpretationService(
+                strategy=strategy,
+                config=config,
+            )
+
             self.session = self._with_settings(self.session)
+
+            # Configurația rulării este capturată înainte de worker.
             snapshot = self.session
             regenerate = self.regenerate_var.get()
+
         except (ValueError, OSError) as exc:
-            messagebox.showerror("Configurare invalidă", str(exc), parent=self.root)
+            messagebox.showerror(
+                "Configurare invalidă",
+                str(exc),
+                parent=self.root,
+            )
             return
 
         def operation(cancel, emit):
-            describer = GeminiBatchDescriber(config)
             for event in describe_selected_batches(
-                snapshot, describer, batch_size=batch_size,
-                min_interval_seconds=13.0,
-                regenerate=regenerate, cancel_event=cancel
+                    snapshot,
+                    service,
+                    batch_size=batch_size,
+                    min_interval_seconds=13.0,
+                    regenerate=regenerate,
+                    cancel_event=cancel,
             ):
                 emit("description_progress", event)
 
         self.tabs.select(self.results_tab)
-        first_selected = next(state for state in snapshot.frames if state.selected)
+
+        first_selected = next(
+            state
+            for state in snapshot.frames
+            if state.selected
+        )
+
         self._show_frame(first_selected.frame_id)
-        self.status_var.set("Se pregătesc descrierile…")
+
+        self.status_var.set(
+            f"Se pregătesc descrierile: {provider} / {model}…"
+        )
+
         self._launch("description", operation)
 
     def _choose_ontology(self):
@@ -1457,13 +1798,20 @@ class WorkflowGUI:
         self.root.destroy()
 
 
-def launch_workflow_gui(*, api_key, model=DEFAULT_MODEL, output_dir):
+def launch_workflow_gui(
+    *,
+    api_keys,
+    model_defaults,
+    initial_provider,
+    output_dir,
+):
     root = tk.Tk()
 
     WorkflowGUI(
         root,
-        api_key=api_key,
-        model=model,
+        api_keys=api_keys,
+        model_defaults=model_defaults,
+        initial_provider=initial_provider,
         output_dir=output_dir,
     )
 

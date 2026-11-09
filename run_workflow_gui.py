@@ -5,25 +5,53 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from interpretation.config import DEFAULT_MODEL
-from gui.workflow_app_backup import launch_workflow_gui
+from gui.workflow_app import launch_workflow_gui
+
 
 def main():
     project_root = Path(__file__).resolve().parent
 
-    load_dotenv(project_root / ".env", override=False)
+    load_dotenv(
+        project_root / ".env",
+        override=False,
+    )
 
-    #Setup pt Openrouter API
-    """launch_workflow_gui(
-        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-        model=os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
-        output_dir=project_root / "output",
-    )"""
+    api_keys = {
+        "gemini": os.environ.get("GEMINI_API_KEY", ""),
+        "openrouter": os.environ.get("OPENROUTER_API_KEY", ""),
+        "openai": os.environ.get("OPENAI_API_KEY", ""),
+    }
 
-    # Setup pt Gemini API
+    model_defaults = {
+        "gemini": os.environ.get(
+            "GEMINI_MODEL",
+            "gemini-3.6-flash",
+        ),
+        "openrouter": os.environ.get(
+            "OPENROUTER_MODEL",
+            "nvidia/nemotron-3.5-super-vl:free",
+        ),
+        "openai": os.environ.get(
+            "OPENAI_MODEL",
+            "gpt-6.1-sol",
+        ),
+    }
+
+    initial_provider = os.environ.get(
+        "VLM_PROVIDER",
+        "openrouter",
+    ).strip().lower()
+
+    if initial_provider not in api_keys:
+        raise ValueError(
+            "VLM_PROVIDER trebuie să fie "
+            "'gemini', 'openrouter' sau 'openai'."
+        )
+
     launch_workflow_gui(
-        api_key=os.environ.get("GEMINI_API_KEY", ""),
-        model=os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"),
+        api_keys=api_keys,
+        model_defaults=model_defaults,
+        initial_provider=initial_provider,
         output_dir=project_root / "output",
     )
 

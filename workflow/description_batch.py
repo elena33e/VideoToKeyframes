@@ -5,7 +5,7 @@ import math
 from threading import Event
 from time import monotonic
 
-from interpretation.describe_batch import FrameInput, MAX_GROUP_SIZE
+from interpretation.contracts import FrameInput, MAX_GROUP_SIZE
 from interpretation.observations import FrameObservation
 from .description import DescriptionProgress, _update_frame
 from .models import WorkflowSession

@@ -170,3 +170,25 @@ class FrameObservation(ObservationModel):
 
         return data
 
+
+class BatchItem(BaseModel):
+    """Observația generată pentru un cadru din grup."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    frame_id: str
+    observation: ImageObservation
+
+
+class BatchResponse(BaseModel):
+    """Răspunsul complet generat pentru un grup de cadre."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+    )
+
+    frames: list[BatchItem]
