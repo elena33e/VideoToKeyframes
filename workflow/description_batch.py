@@ -10,14 +10,22 @@ from interpretation.observations import FrameObservation
 from .description import DescriptionProgress, _update_frame
 from .models import WorkflowSession
 from .service import get_frame_path, get_selected_frames
+from interpretation.config import DEFAULT_MIN_REQUEST_INTERVAL_SECONDS
 
 
 def describe_selected_batches(
-    session, describer, *, batch_size=3, min_interval_seconds=13.0,
-    regenerate=False, cancel_event=None,
+    session,
+    describer,
+    *,
+    batch_size=3,
+    min_interval_seconds=DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
+    regenerate=False,
+    cancel_event=None,
 ):
     if type(batch_size) is not int or not 1 <= batch_size <= MAX_GROUP_SIZE:
-        raise ValueError("Numărul imaginilor per apel trebuie să fie între 1 și 4.")
+        raise ValueError(
+            f"Numărul imaginilor per apel trebuie să fie între 1 și {MAX_GROUP_SIZE}."
+        )
     if not math.isfinite(min_interval_seconds) or min_interval_seconds < 0:
         raise ValueError("Intervalul dintre cereri trebuie să fie nenegativ.")
     current = WorkflowSession.model_validate(session.model_dump())

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from rdflib import Graph
 
-from interpretation.ontology_context import build_ontology_context
+from ontology.context import build_ontology_context
 
 
 SOURCE = Path(

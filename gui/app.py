@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import threading
 import tkinter as tk
@@ -9,10 +8,9 @@ from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
-from extraction.keyframe_extractor import KatnaKeyframeExtractorService
-from extraction.pipeline import PipelineError, VideoProcessingPipeline
-from extraction.scene_detector import PySceneDetectorService
-
+from extraction.factory import create_pipeline
+from extraction.pipeline import PipelineError
+from extraction.models import ExtractionSettings
 
 logger = logging.getLogger(__name__)
 
@@ -217,39 +215,32 @@ class VideoPipelineGUI:
             seconds_per_keyframe = float(
                 self.seconds_var.get().replace(",", ".")
             )
-            if (
-                    not math.isfinite(seconds_per_keyframe)
-                    or seconds_per_keyframe <= 0
-            ):
-                raise ValueError(
-                    "Intervalul pentru keyframes "
-                    "trebuie să fie pozitiv și finit."
-                )
-
-            limit = None
-            if self.limit_enabled_var.get():
-                limit = int(self.limit_var.get())
-                if limit < 1:
-                    raise ValueError(
-                        "Limita totală trebuie să fie un întreg pozitiv."
-                    )
-
-            workers = int(self.workers_var.get())
             threshold = float(
                 self.threshold_var.get().replace(",", ".")
             )
+            workers = int(self.workers_var.get())
 
-            if not 1 <= workers <= (os.cpu_count() or 1):
-                raise ValueError(
-                    "Numărul de procese depășește capacitatea procesorului."
-                )
+            limit = (
+                int(self.limit_var.get())
+                if self.limit_enabled_var.get()
+                else None
+            )
 
-            if (
-                    not math.isfinite(threshold)
-                    or not 0 < threshold <= 255
-            ):
+            settings = ExtractionSettings(
+                seconds_per_keyframe=seconds_per_keyframe,
+                threshold=threshold,
+                max_workers=workers,
+                max_total_keyframes=limit,
+            )
+
+            if not 0 < threshold <= 255:
                 raise ValueError(
                     "Pragul trebuie să fie mai mare de 0 și cel mult 255."
+                )
+
+            if workers > (os.cpu_count() or 1):
+                raise ValueError(
+                    "Numărul de procese depășește capacitatea procesorului."
                 )
 
         except (ValueError, OSError) as exc:
@@ -269,10 +260,10 @@ class VideoPipelineGUI:
             args=(
                 video,
                 output,
-                limit,
+                settings.max_total_keyframes,
                 threshold,
                 workers,
-                seconds_per_keyframe,
+                settings.seconds_per_keyframe,
             ),
             daemon=False,
         ).start()
@@ -285,9 +276,9 @@ class VideoPipelineGUI:
         result = None
 
         try:
-            pipeline = VideoProcessingPipeline(
-                PySceneDetectorService(threshold=threshold),
-                KatnaKeyframeExtractorService(max_workers=workers),
+            pipeline = create_pipeline(
+                threshold=threshold,
+                max_workers=workers,
             )
 
             with ExitStack() as stack:

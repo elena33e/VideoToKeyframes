@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from extraction.models import ExtractedFrame, ExtractionResult
 from interpretation.observations import FrameObservation
-
+from interpretation.contracts import MAX_GROUP_SIZE
 
 NonEmptyText = Annotated[str, Field(min_length=1)]
 
@@ -97,7 +97,11 @@ class ImportedFrame(WorkflowModel):
 class InterpretationSettings(WorkflowModel):
     """Configurația curentă; observațiile păstrează separat ce au folosit."""
     provider: str = ""
-    batch_size: int = Field(default=1, ge=1, le=4)
+    batch_size: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_GROUP_SIZE,
+    )
     model: str = ""
     language: str = ""
     domain_context: str = ""

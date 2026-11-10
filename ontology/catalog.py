@@ -4,12 +4,13 @@ from pathlib import Path
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS
 
-from .models import (
+from ontology.models import (
     ConceptKind,
     OntologyCatalog,
     OntologyConcept,
     OntologyText,
 )
+from .reader import OntologySource, read_ontology_source
 
 
 OBO = Namespace("http://purl.obolibrary.org/obo/")
@@ -171,27 +172,23 @@ def load_ontology(
     rdf_format: str | None = None,
     include_individuals: bool = True,
 ) -> OntologyCatalog:
-    """
-    Încarcă o ontologie locală și construiește catalogul.
+    """Încarcă o ontologie locală și returnează catalogul."""
+    _, catalog = load_ontology_with_source(
+        path,
+        rdf_format=rdf_format,
+        include_individuals=include_individuals,
+    )
+    return catalog
 
-    Pentru .owl se presupune RDF/XML. Dacă fișierul conține Turtle,
-    transmite rdf_format="turtle".
 
-    Nu încarcă automat owl:imports și nu execută inferență.
-    Expresiile OWL anonime nu sunt transformate în concepte.
-    """
-
+def load_ontology_with_source(
+    path: str | Path,
+    *,
+    rdf_format: str | None = None,
+    include_individuals: bool = True,
+) -> tuple[OntologySource, OntologyCatalog]:
+    """Citește sursa o dată și construiește catalogul."""
     source = Path(path).expanduser().resolve()
-
-    if not source.is_file():
-        raise FileNotFoundError(
-            f"Fișierul ontologiei nu există: {source}"
-        )
-
-    if source.stat().st_size == 0:
-        raise ValueError(
-            f"Fișierul ontologiei este gol: {source}"
-        )
 
     selected_format = rdf_format or FORMATS_BY_SUFFIX.get(
         source.suffix.lower()
@@ -204,18 +201,25 @@ def load_ontology(
             "Fișierele OBO și OWL/XML necesită conversie în RDF."
         )
 
-    graph = Graph()
+    loaded = read_ontology_source(
+        source,
+        rdf_format=selected_format,
+    )
+    catalog = build_ontology_catalog(
+        loaded,
+        include_individuals=include_individuals,
+    )
 
-    try:
-        graph.parse(
-            source=str(source),
-            format=selected_format,
-        )
-    except Exception as exc:
-        raise ValueError(
-            f"Ontologia nu a putut fi citită ca "
-            f"{selected_format}: {source}. Detalii: {exc}"
-        ) from exc
+    return loaded, catalog
+
+def build_ontology_catalog(
+    loaded: OntologySource,
+    *,
+    include_individuals: bool = True,
+) -> OntologyCatalog:
+    """Construiește catalogul dintr-o sursă deja citită."""
+    source = loaded.path
+    graph = loaded.graph
 
     concept_kinds = _find_concept_kinds(
         graph,

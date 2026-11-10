@@ -2,8 +2,6 @@
 
 import hashlib
 import json
-from collections import Counter
-import math
 import os
 import threading
 import tkinter as tk
@@ -11,20 +9,18 @@ from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
+from copy import deepcopy
 
 
 from PIL import Image, ImageOps, ImageTk
 
-from extraction.keyframe_extractor import KatnaKeyframeExtractorService
-from extraction.pipeline import PipelineError, VideoProcessingPipeline
-from extraction.scene_detector import PySceneDetectorService
+from extraction.factory import create_pipeline
+from extraction.pipeline import PipelineError
 from interpretation.config import InterpretationConfig
 from interpretation.service import BatchInterpretationService
-from interpretation.strategies.gemini import GeminiStrategy
-from interpretation.strategies.openrouter import OpenRouterStrategy
-from interpretation.strategies.openai import OpenAIStrategy
-from interpretation.ontology import load_ontology
-from interpretation.ontology_context import build_ontology_context
+from interpretation.strategies.factory import create_strategy
+from ontology.catalog import load_ontology_with_source
+from ontology.context import build_ontology_context_with_source
 from workflow.description_batch import describe_selected_batches
 from workflow.models import InterpretationSettings, WorkflowSession
 from workflow.service import (
@@ -35,11 +31,15 @@ from workflow.service import (
 )
 from gui.keyframe_gallery import KeyframeGallery
 from workflow.persistence import save_session_jsonld
+from extraction.models import ExtractionSettings
+from ontology.namespaces import suggest_namespaces
+from gui.formatting import observation_text
 
 from interpretation.config import (
     DEFAULT_LANGUAGE,
     DEFAULT_DOMAIN_CONTEXT,
 )
+from interpretation.contracts import MAX_GROUP_SIZE
 
 STATUS_LABELS = {
     "pending": "Nedescris",
@@ -47,51 +47,6 @@ STATUS_LABELS = {
     "completed": "Descris",
     "failed": "Eroare",
 }
-
-
-def observation_text(result):
-    obs = result.observation
-    grouped = result.usage.get("scope") == "request"
-    usage = result.usage.get("request_usage", {}) if grouped else result.usage
-    scope = " (întregul apel, comun cadrelor din grup)" if grouped else ""
-    names = {entity.id: entity.name for entity in obs.entities}
-
-    lines = [obs.description, "", "OBIECTE"]
-
-    for entity in obs.entities:
-        lines.append(
-            f"• {entity.name}: {', '.join(entity.features)}\n"
-            f"  Poziție: {entity.location}; "
-            f"vizibilitate: {entity.visibility}"
-        )
-
-    lines += ["", "RELAȚII"]
-
-    for relation in obs.relations:
-        lines.append(
-            f"• {names[relation.subject_id]} — "
-            f"{relation.predicate} — "
-            f"{names[relation.object_id]}"
-        )
-
-    lines += ["", "ACTIVITATE"]
-    lines += [
-        f"• {action.description}"
-        + (" (incert)" if action.uncertain else "")
-        for action in obs.actions
-    ]
-
-    lines += ["", "TEXT VIZIBIL", *obs.visible_text]
-    lines += ["", "INCERTITUDINI", *obs.uncertainties]
-
-    lines += [
-        "",
-        f"Model: {result.resolved_model}",
-        f"Durată{scope}: {result.elapsed_seconds:.2f} s",
-        f"Tokeni{scope}: {usage.get('total_tokens', 'indisponibil')}",
-    ]
-
-    return "\n".join(lines)
 
 
 class WorkflowGUI:
@@ -153,6 +108,7 @@ class WorkflowGUI:
         self.language_var = tk.StringVar(
             value={"English": "Engleză", "Romanian": "Română"}.get(DEFAULT_LANGUAGE, DEFAULT_LANGUAGE)
         )
+        self.ontology_source = None
         self.use_ontology_var = tk.BooleanVar(value=False)
         self.namespace_var = tk.StringVar()
         self.ontology_format_var = tk.StringVar(value="După extensie")
@@ -454,7 +410,7 @@ class WorkflowGUI:
         self.batch_size_combo = ttk.Combobox(
             fields,
             textvariable=self.batch_size_var,
-            values=("1", "2", "3", "4"),
+            values=tuple(str(size) for size in range(1, MAX_GROUP_SIZE + 1)),
             state="readonly",
         )
         self.batch_size_combo.grid(
@@ -703,7 +659,7 @@ class WorkflowGUI:
             namespace=self.namespace_var.get().strip(),
             rdf_format=self._rdf_format(),
             context_turtle=context.turtle if context else "",
-            context_report=json.loads(json.dumps(context.report)) if context else {},
+            context_report=deepcopy(context.report) if context else {},
         )
 
     def _with_settings(self, session):
@@ -752,8 +708,8 @@ class WorkflowGUI:
         except ValueError:
             return "Alege un număr valid de imagini per apel."
 
-        if not 1 <= batch_size <= 4:
-            return "Alege între 1 și 4 imagini per apel."
+        if not 1 <= batch_size <= MAX_GROUP_SIZE:
+            return f"Alege între 1 și {MAX_GROUP_SIZE} imagini per apel."
 
         if not self._language():
             return "Completează limba descrierilor."
@@ -836,12 +792,18 @@ class WorkflowGUI:
         path = self.ontology_path
         namespace = self.namespace_var.get().strip()
         rdf_format = self._rdf_format()
+        cached_source = self.ontology_source
         self._invalidate_context()
         self.context_status_var.set("Se pregătește contextul…")
         self.status_var.set("Se extrage vocabularul ontologiei, local…")
         self._launch(
             "context",
-            lambda cancel, emit: build_ontology_context(path, namespace, rdf_format=rdf_format),
+            lambda cancel, emit: build_ontology_context_with_source(
+                path,
+                namespace,
+                rdf_format=rdf_format,
+                cached_source=cached_source,
+            ),
         )
 
     def _export_context(self):
@@ -990,21 +952,22 @@ class WorkflowGUI:
                     "Destinația trebuie să fie un director."
                 )
 
-            if not math.isfinite(seconds) or seconds <= 0:
+            settings = ExtractionSettings(
+                seconds_per_keyframe=seconds,
+                threshold=threshold,
+                max_workers=workers,
+                max_total_keyframes=limit,
+            )
+
+            if not 0 < threshold <= 255:
                 raise ValueError(
-                    "Intervalul trebuie să fie pozitiv și finit."
+                    "Pragul trebuie să fie mai mare de 0 și cel mult 255."
                 )
 
-            if not math.isfinite(threshold) or not 0 < threshold <= 255:
+            if workers > (os.cpu_count() or 1):
                 raise ValueError(
-                    "Pragul trebuie să fie între 0 și 255, exclusiv 0."
+                    "Numărul de procese depășește capacitatea procesorului."
                 )
-
-            if not 1 <= workers <= (os.cpu_count() or 1):
-                raise ValueError("Număr de procese nevalid.")
-
-            if limit is not None and limit < 1:
-                raise ValueError("Limita trebuie să fie pozitivă.")
 
         except (ValueError, OSError) as exc:
             messagebox.showerror(
@@ -1023,17 +986,17 @@ class WorkflowGUI:
             return
 
         def operation(cancel, emit):
-            pipeline = VideoProcessingPipeline(
-                PySceneDetectorService(threshold=threshold),
-                KatnaKeyframeExtractorService(max_workers=workers),
+            pipeline = create_pipeline(
+                threshold=threshold,
+                max_workers=workers,
             )
 
             try:
                 return pipeline.run(
                     input_video=video,
                     base_output_dir=output,
-                    seconds_per_keyframe=seconds,
-                    max_total_keyframes=limit,
+                    seconds_per_keyframe=settings.seconds_per_keyframe,
+                    max_total_keyframes=settings.max_total_keyframes,
                     cancel_event=cancel,
                     progress_callback=lambda text, current, total: emit(
                         "extraction_progress",
@@ -1219,6 +1182,49 @@ class WorkflowGUI:
             self._set_text(self.observation_widget, "")
             self._set_text(self.json_widget, "")
 
+    def _load_frame_previews(self, frame_id, sizes):
+        """Încarcă imaginea o dată și creează previzualizările cerute."""
+        path = get_frame_path(self.session, frame_id)
+        photos = []
+
+        with Image.open(path) as source:
+            with ImageOps.exif_transpose(source) as oriented:
+                with oriented.convert("RGB") as image:
+                    for size in sizes:
+                        with image.copy() as preview:
+                            preview.thumbnail(
+                                size,
+                                Image.Resampling.LANCZOS,
+                            )
+                            photos.append(
+                                ImageTk.PhotoImage(
+                                    preview,
+                                    master=self.root,
+                                )
+                            )
+
+        return tuple(photos)
+
+    def _frame_caption(self, frame_id):
+        frame = self.frames_by_id[frame_id]
+
+        if self.session.extraction is None:
+            return (
+                f"{frame.image_path.name} | Imagine încărcată direct."
+            )
+
+        scene = next(
+            scene
+            for scene in self.session.extraction.scenes
+            if scene.index == frame.scene_index
+        )
+
+        return (
+            f"{frame.image_path.name} | Scena {scene.index}: "
+            f"{scene.start_seconds:.2f}–{scene.end_seconds:.2f} s. "
+            "Intervalul este al scenei, nu timestamp-ul cadrului."
+        )
+
     def _show_selection_frame(self, frame_id):
         """Previzualizează orice cadru în pasul 2, independent de rezultate."""
         if frame_id not in self.frames_by_id:
@@ -1230,22 +1236,10 @@ class WorkflowGUI:
         # Invalidăm cache-ul pentru revenirea ulterioară la acel cadru.
         self.preview_id = None
 
-        frame = self.frames_by_id[frame_id]
-
         try:
-            path = get_frame_path(self.session, frame_id)
-
-            with Image.open(path) as source:
-                preview = ImageOps.exif_transpose(source).convert("RGB")
-
-            preview.thumbnail(
-                (520, 390),
-                Image.Resampling.LANCZOS,
-            )
-
-            self.selection_preview_photo = ImageTk.PhotoImage(
-                preview,
-                master=self.root,
+            (self.selection_preview_photo,) = self._load_frame_previews(
+                frame_id,
+                sizes=((520, 390),),
             )
             self.selection_picture.configure(
                 image=self.selection_preview_photo,
@@ -1259,22 +1253,9 @@ class WorkflowGUI:
                 text=f"Imagine indisponibilă: {exc}",
             )
 
-        if self.session.extraction is None:
-            caption = (
-                f"{frame.image_path.name} | Imagine încărcată direct."
-            )
-        else:
-            scene = next(
-                s for s in self.session.extraction.scenes
-                if s.index == frame.scene_index
-            )
-            caption = (
-                f"{frame.image_path.name} | Scena {scene.index}: "
-                f"{scene.start_seconds:.2f}–{scene.end_seconds:.2f} s. "
-                "Intervalul este al scenei, nu timestamp-ul cadrului."
-            )
-
-        self.selection_caption.configure(text=caption)
+        self.selection_caption.configure(
+            text=self._frame_caption(frame_id)
+        )
 
     def _update_row(self, frame_id):
         state = next(
@@ -1300,7 +1281,6 @@ class WorkflowGUI:
         self.active_frame_id = frame_id
         self.gallery.mark_active(frame_id)
 
-        frame = self.frames_by_id[frame_id]
         state = next(
             s for s in self.session.frames
             if s.frame_id == frame_id
@@ -1308,25 +1288,17 @@ class WorkflowGUI:
 
         if self.preview_id != frame_id:
             try:
-                path = get_frame_path(self.session, frame_id)
-
-                with Image.open(path) as source:
-                    preview = ImageOps.exif_transpose(source).convert(
-                        "RGB"
-                    )
-
-                selection_preview = preview.copy()
-                selection_preview.thumbnail((520, 390), Image.Resampling.LANCZOS)
-                self.selection_preview_photo = ImageTk.PhotoImage(selection_preview, master=self.root)
-                self.selection_picture.configure(image=self.selection_preview_photo, text="")
-                preview.thumbnail(
-                    (560, 240),
-                    Image.Resampling.LANCZOS,
+                (
+                    self.selection_preview_photo,
+                    self.preview_photo,
+                ) = self._load_frame_previews(
+                    frame_id,
+                    sizes=((520, 390), (560, 240)),
                 )
 
-                self.preview_photo = ImageTk.PhotoImage(
-                    preview,
-                    master=self.root,
+                self.selection_picture.configure(
+                    image=self.selection_preview_photo,
+                    text="",
                 )
                 self.picture.configure(
                     image=self.preview_photo,
@@ -1336,27 +1308,20 @@ class WorkflowGUI:
 
             except (OSError, ValueError) as exc:
                 self.preview_id = None
-                self.selection_picture.configure(image="", text=f"Imagine indisponibilă: {exc}")
+                self.selection_preview_photo = None
+                self.preview_photo = None
+
+                message = f"Imagine indisponibilă: {exc}"
+                self.selection_picture.configure(
+                    image="",
+                    text=message,
+                )
                 self.picture.configure(
                     image="",
-                    text=f"Imagine indisponibilă: {exc}",
+                    text=message,
                 )
 
-        if self.session.extraction is None:
-            caption = (
-                f"{frame.image_path.name} | Imagine încărcată direct."
-            )
-        else:
-            scene = next(
-                s for s in self.session.extraction.scenes
-                if s.index == frame.scene_index
-            )
-            caption = (
-                f"{frame.image_path.name} | Scena {scene.index}: "
-                f"{scene.start_seconds:.2f}–{scene.end_seconds:.2f} s. "
-                "Intervalul este al scenei, nu timestamp-ul cadrului."
-            )
-
+        caption = self._frame_caption(frame_id)
         self.caption.configure(text=caption)
         self.selection_caption.configure(text=caption)
 
@@ -1442,7 +1407,6 @@ class WorkflowGUI:
             config = InterpretationConfig(
                 language=self._language(),
                 domain_context=self.domain_var.get().strip(),
-                max_output_tokens_per_image=4096,
                 ontology_context=(
                     context.turtle if context else ""
                 ),
@@ -1460,33 +1424,11 @@ class WorkflowGUI:
                 ),
             )
 
-            # Clientul alege explicit strategia.
-            if provider == "gemini":
-                strategy = GeminiStrategy(
-                    api_key=api_key,
-                    model=model,
-                    timeout_seconds=180.0,
-                )
-
-            elif provider == "openrouter":
-                strategy = OpenRouterStrategy(
-                    api_key=api_key,
-                    model=model,
-                    timeout_seconds=180.0,
-                )
-
-            elif provider == "openai":
-                strategy = OpenAIStrategy(
-                    api_key=api_key,
-                    model=model,
-                    timeout_seconds=180.0,
-                    reasoning_effort="low",
-                )
-
-            else:
-                raise ValueError(
-                    f"Furnizor necunoscut: {provider}"
-                )
+            strategy = create_strategy(
+                provider,
+                api_key=api_key,
+                model=model,
+            )
 
             service = BatchInterpretationService(
                 strategy=strategy,
@@ -1512,7 +1454,6 @@ class WorkflowGUI:
                     snapshot,
                     service,
                     batch_size=batch_size,
-                    min_interval_seconds=13.0,
                     regenerate=regenerate,
                     cancel_event=cancel,
             ):
@@ -1545,6 +1486,7 @@ class WorkflowGUI:
             path = Path(filename).resolve()
             rdf_format = self._rdf_format()
             self.ontology_path = path
+            self.ontology_source = None
             self.ontology_file_var.set(str(path))
             self.namespace_combo.configure(values=())
             self.namespace_var.set("")
@@ -1552,7 +1494,10 @@ class WorkflowGUI:
             self.status_var.set("Se citește ontologia…")
             self._launch(
                 "ontology",
-                lambda cancel, emit: load_ontology(path, rdf_format=rdf_format),
+                lambda cancel, emit: load_ontology_with_source(
+                    path,
+                    rdf_format=rdf_format,
+                ),
             )
 
     def _poll_events(self):
@@ -1665,39 +1610,68 @@ class WorkflowGUI:
                     "Bifează imaginile pe care vrei să le descrii."
                 )
 
+
+
             elif job == "ontology":
-                self.ontology_path = Path(result.source)
+
+                self.ontology_source, catalog = result
+
+                self.ontology_path = Path(catalog.source)
+
                 self.ontology_file_var.set(str(self.ontology_path))
-                candidates = Counter()
-                for concept in result.concepts:
-                    iri = concept.iri
-                    if "#" in iri:
-                        prefix = iri.rsplit("#", 1)[0] + "#"
-                    elif "/" in iri:
-                        prefix = iri.rsplit("/", 1)[0] + "/"
-                    else:
-                        continue
-                    if not prefix.startswith(("http://www.w3.org/", "https://www.w3.org/")):
-                        candidates[prefix] += 1
-                preferred = {
-                    iri.rstrip("#/") + suffix
-                    for iri in result.ontology_iris for suffix in ("#", "/")
-                }
-                suggestions = sorted(
-                    candidates, key=lambda ns: (ns not in preferred, -candidates[ns], ns)
-                )
+
+                suggestions = suggest_namespaces(catalog)
+
                 self.namespace_combo.configure(values=suggestions)
-                self.namespace_var.set(suggestions[0] if suggestions else "")
-                self._set_text(
-                    self.ontology_widget,
-                    json.dumps(result.summary(), ensure_ascii=False, indent=2),
+
+                self.namespace_var.set(
+
+                    suggestions[0] if suggestions else ""
+
                 )
-                self.context_status_var.set("Verifică namespace-ul propus, apoi pregătește contextul.")
-                self.status_var.set("Ontologie încărcată. Contextul trebuie pregătit înainte de analiză.")
+
+                self._set_text(
+
+                    self.ontology_widget,
+
+                    json.dumps(
+
+                        catalog.summary(),
+
+                        ensure_ascii=False,
+
+                        indent=2,
+
+                    ),
+
+                )
+
+                self.context_status_var.set(
+
+                    "Verifică namespace-ul propus, "
+
+                    "apoi pregătește contextul."
+
+                )
+
+                self.status_var.set(
+
+                    "Ontologie încărcată. Contextul trebuie "
+
+                    "pregătit înainte de analiză."
+
+                )
 
             elif job == "context":
-                self.ontology_context = result
+
+                self.ontology_source, context = result
+
+                self.ontology_context = context
+
+                result = context
+
                 report = result.report
+
                 self.context_status_var.set(
                     f"Context pregătit: {report['anchor_count']} concepte proprii · "
                     f"{report['context_triples']} triplete · "

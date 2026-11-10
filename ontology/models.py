@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field, asdict
-from urllib.parse import unquote
+"""Structurile catalogului ontologiei."""
+
+from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 
 
 class ConceptKind(StrEnum):
@@ -12,10 +12,12 @@ class ConceptKind(StrEnum):
 
 @dataclass(frozen=True)
 class OntologyText:
-    """Un text din ontologie, cu limba si proprietatea sursa"""
-    value:str
+    """Un text din ontologie, cu limba și proprietatea sursă."""
+
+    value: str
     language: str | None = None
     predicate: str = ""
+
 
 @dataclass
 class OntologyConcept:
@@ -24,36 +26,8 @@ class OntologyConcept:
     labels: list[OntologyText] = field(default_factory=list)
     synonyms: list[OntologyText] = field(default_factory=list)
     definitions: list[OntologyText] = field(default_factory=list)
-
     parents: list[str] = field(default_factory=list)
     types: list[str] = field(default_factory=list)
-
-    def preferred_label(
-            self,
-            languages: tuple[str, ...] = ("ro", "en"),
-    ) -> str:
-        for language in languages:
-            requested = language.lower()
-
-            for label in self.labels:
-                if (label.language or "").lower() == requested:
-                    return label.value
-
-            for label in self.labels:
-                actual = (label.language or "").lower()
-                if actual.startswith(requested + "-"):
-                    return label.value
-
-        for label in self.labels:
-            if label.language is None:
-                return label.value
-
-        if self.labels:
-            return self.labels[0].value
-
-        fragment = self.iri.rstrip("/").rsplit("#", 1)[-1]
-        fragment = fragment.rsplit("/", 1)[-1]
-        return unquote(fragment or self.iri)
 
 
 @dataclass
@@ -63,24 +37,6 @@ class OntologyCatalog:
     ontology_iris: list[str] = field(default_factory=list)
     imports: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    def save_json(self, path: str | Path) -> Path:
-        import json
-
-        destination = Path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(
-            json.dumps(
-                self.to_dict(),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return destination
 
     def summary(self) -> dict:
         return {

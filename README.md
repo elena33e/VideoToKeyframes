@@ -1,63 +1,62 @@
 # VideoToKeyframes
 
-Aplicație desktop pentru extragerea cadrelor reprezentative din videoclipuri, selectarea lor manuală și generarea descrierilor cu ajutorul unui model vizual de limbaj — VLM.
+Aplicație desktop pentru extragerea cadrelor reprezentative din videoclipuri, selectarea imaginilor relevante și generarea de observații structurate cu ajutorul modelelor vizuale de limbaj (VLM).
 
-Extragerea folosește **PySceneDetect** pentru detectarea scenelor și **Katna** pentru selectarea keyframe-urilor. Imaginile selectate de utilizator sunt descrise prin API-ul OpenRouter, iar rezultatele pot fi salvate în **JSON-LD**.
+Extragerea folosește **PySceneDetect** pentru detectarea scenelor și **Katna** pentru alegerea keyframe-urilor. Interpretarea imaginilor se face prin **OpenAI**, **Gemini** sau **OpenRouter**, folosind strategii separate și un contract comun de răspuns. Rezultatele pot fi salvate în **JSON-LD**.
 
-Aplicația permite și încărcarea directă a unor imagini existente, fără procesarea unui video.
+Se pot încărca și imagini existente, fără extragere dintr-un videoclip.
+
+**Stadiu:** ontologia poate ghida terminologia descrierilor. Extragerea indivizilor, clasificarea lor și popularea proprietăților ontologiei nu sunt încă implementate. JSON-LD-ul exportat reprezintă observațiile aplicației, nu popularea ontologiei încărcate.
 
 ## Funcționalități
 
 - Detectarea scenelor și comasarea fragmentelor foarte scurte.
-- Extragerea unui număr de cadre adaptat duratei fiecărei scene.
-- Limitarea opțională a numărului total de cadre.
-- Configurarea numărului de procese utilizate de Katna.
-- Păstrarea rezultatelor valide când unele scene nu pot fi procesate.
-- Galerie cu miniaturi, previzualizare și selecție prin bifare.
+- Extragerea unui număr de cadre adaptat duratei scenelor, cu limită globală opțională.
+- Configurarea pragului de detectare și a proceselor Katna.
+- Galerie cu miniaturi, previzualizare și selecție manuală.
 - Încărcarea directă a imaginilor JPEG, PNG și WEBP.
-- Descrierea imaginilor selectate: obiecte, caracteristici, relații, acțiuni, text vizibil și incertitudini.
-- Afișarea observațiilor și salvarea sesiunii în JSON-LD.
-- Pregătirea unui vocabular compact din ontologie, opțional pentru ghidarea descrierii.
-- Diagnosticarea separată a performanței extragerii.
-
-**Maparea observațiilor la ontologia încărcată nu este încă implementată.** VLM-ul poate primi contextul Turtle extras local, pentru ghidarea vocabularului. Folosirea lui este opțională.
+- Interpretarea imaginilor în grupuri de 1–4 cadre, cu observații separate pentru fiecare cadru.
+- Alegerea furnizorului și a modelului din interfață.
+- Context de domeniu și vocabular ontologic opționale.
+- Descrieri, entități, relații, acțiuni, text relevant și incertitudini.
+- Validarea răspunsurilor și păstrarea provenienței analizelor.
+- Regenerare explicită, anulare între operații și păstrarea rezultatelor deja obținute.
+- Afișarea rezultatelor selectate și salvarea sesiunii în JSON-LD.
+- Interfață separată pentru diagnosticarea performanței extragerii.
 
 ## Fluxul aplicației
 
 ```text
-Video → extragere keyframes ──┐
-                             ├→ galerie → selecție → descriere VLM → JSON-LD
-Imagini încărcate direct ─────┘
-
-Ontologie + namespace → vocabular Turtle → context opțional pentru descrierea VLM
+Video → detectare scene → extragere keyframes ──┐
+                                              ├→ galerie → selecție → interpretare VLM
+Imagini încărcate direct ──────────────────────┘                         ↓
+                                                            validare Pydantic
+Ontologie → catalog și namespace → context Turtle ──→ VLM               ↓
+                                                               export JSON-LD
 ```
 
-O sesiune conține fie cadrele unei extrageri, fie imagini încărcate direct. Începerea unei noi extrageri sau încărcarea unui nou set de imagini înlocuiește sesiunea din interfață, după confirmare dacă există modificări nesalvate.
+O sesiune conține fie cadrele unei extrageri, fie imagini încărcate direct. Încărcarea unui set nou înlocuiește sesiunea din interfață, după confirmare dacă există modificări nesalvate.
 
-VLM-ul produce observații în JSON conform unei scheme. Aplicația validează structura și referințele dintre entități, adaugă metadatele și construiește local JSON-LD. Această conversie nu necesită un apel suplimentar la model.
-
-Detalii despre reprezentare: [Workflow și JSON-LD](workflow/README.md).
+VLM-ul generează JSON conform unei scheme. Aplicația validează răspunsul, adaugă metadatele și construiește local JSON-LD, fără un apel suplimentar la model. Detalii: [Workflow și JSON-LD](workflow/README.md).
 
 ## Cerințe
 
-Configurația folosită la testare:
+Configurația de dezvoltare și testare folosește Windows și Python 3.11, pe 64 de biți; instalarea inițială a fost verificată cu Python 3.11.11.
 
-- Windows;
-- Python 3.11.11, pe 64 de biți;
-- Tkinter disponibil;
-- dependențele din `requirements.txt`;
-- FFmpeg disponibil pentru procesarea video;
-- acces la internet și o cheie OpenRouter pentru descrierea imaginilor.
+Sunt necesare:
 
-Extragerea, galeria și încărcarea ontologiei pot fi folosite fără cheia API.
+- Python cu Tkinter disponibil;
+- dependențele din `requirements.txt` și wheelul local PySceneDetect;
+- FFmpeg pentru exportul scenelor;
+- internet și o cheie API pentru furnizorul folosit la interpretare.
 
-FFmpeg poate fi furnizat de `imageio-ffmpeg`, instalat ca dependență a Katna. PySceneDetect poate folosi și un executabil FFmpeg disponibil în `PATH`.
+Extragerea, galeria și prelucrarea locală a ontologiei pot fi folosite fără o cheie API. Interfața actuală este orientată către Windows.
 
 ## Instalare
 
 Comenzile următoare se execută în PowerShell.
 
-### 1. Obținerea proiectului
+### Obținerea proiectului
 
 Versiunea cu interfața unificată este dezvoltată pe branchul `feature/interpretation`:
 
@@ -66,86 +65,78 @@ git clone --branch feature/interpretation https://github.com/elena33e/VideoToKey
 cd VideoToKeyframes
 ```
 
-### 2. Crearea mediului virtual
+Dacă proiectul există deja local, execută pașii următori din rădăcina lui.
+
+### Mediul virtual și dependențele
 
 ```powershell
 py -3.11 -m venv .venv
-```
-
-Se recomandă un mediu virtual nou, fără pachete preluate din alte proiecte.
-
-### 3. Instalarea dependențelor
-
-Verifică existența wheelului inclus în proiect:
-
-```text
-wheels/scenedetect_core-0.7.2-py3-none-any.whl
-```
-
-Apoi rulează:
-
-```powershell
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-Comenzile folosesc direct interpretul mediului virtual; activarea acestuia nu este necesară.
+Comenzile folosesc direct interpretul mediului virtual; activarea acestuia nu este necesară. Se recomandă un mediu nou, fără pachete preluate din alte proiecte.
 
-### 4. Verificarea componentelor
+Wheelul următor trebuie să fie prezent în repository:
 
-Pentru Tkinter:
+```text
+wheels/scenedetect_core-0.7.2-py3-none-any.whl
+```
+
+Proiectul folosește un wheel construit din configurația `scenedetect-core` a sursei PySceneDetect, pentru a permite folosirea `opencv-contrib-python`, necesar pentru Katna. Nu instala suplimentar `opencv-python`, variante OpenCV headless sau `scenedetect[opencv]` în același mediu: distribuțiile furnizează același modul `cv2`.
+
+Opțiunea `--only-binary katna` din `requirements.txt` solicită instalarea Katna din wheel. Dependențele principale sunt configurate în acel fișier; nu toate versiunile și dependențele tranzitive sunt fixate exact.
+
+### Verificarea Tkinter și FFmpeg
 
 ```powershell
 .\.venv\Scripts\python.exe -m tkinter
-```
-
-Pentru disponibilitatea FFmpeg în PySceneDetect:
-
-```powershell
 .\.venv\Scripts\python.exe -c "from scenedetect import is_ffmpeg_available; print(is_ffmpeg_available())"
 ```
 
-Rezultatul așteptat pentru FFmpeg este `True`.
+Prima comandă trebuie să deschidă fereastra demonstrativă Tkinter, iar a doua să afișeze `True`.
 
-## Particularități ale dependențelor
+FFmpeg poate fi furnizat de `imageio-ffmpeg`, instalat ca dependență a Katna, sau de un executabil disponibil în `PATH`, în funcție de configurația PySceneDetect.
 
-Proiectul folosește un wheel local construit din configurația `scenedetect-core` a sursei PySceneDetect. Acesta permite utilizarea `opencv-contrib-python`, necesar pentru Katna, fără instalarea simultană a `opencv-python`.
+## Configurarea furnizorilor VLM
 
-Cele două distribuții OpenCV furnizează același modul `cv2`. Nu instala suplimentar `scenedetect[opencv]`, `opencv-python` sau variante OpenCV headless în acest mediu.
-
-Opțiunea `--only-binary katna` din `requirements.txt` impune instalarea Katna din wheel. Configurația proiectului a fost testată cu Python 3.11.11 și Katna 0.9.2.
-
-Dependențele principale sunt fixate în `requirements.txt`; dependențele tranzitive nu sunt toate fixate individual.
-
-## Configurarea descrierii imaginilor
-
-Creează un fișier `.env` în rădăcina proiectului:
+Creează `.env` în rădăcina proiectului. De exemplu, pentru OpenAI:
 
 ```dotenv
-OPENROUTER_API_KEY=cheia_ta
-OPENROUTER_MODEL=nvidia/nemotron-3.5-super-vl:free
+VLM_PROVIDER=openai
+OPENAI_API_KEY=cheia_ta
 ```
 
-`OPENROUTER_MODEL` este opțional. Dacă lipsește, aplicația folosește modelul implicit din `interpretation/config.py`. Variabilele deja definite în mediul procesului au prioritate față de `.env`.
+Este suficientă cheia furnizorului pe care îl folosești. Poți configura mai mulți furnizori și poți schimba selecția din GUI.
 
-Fișierul `.env` este exclus din Git.
+| Furnizor | Valoare `VLM_PROVIDER` | Cheie API | Model inițial opțional |
+|---|---|---|---|
+| OpenAI | `openai` | `OPENAI_API_KEY` | `OPENAI_MODEL` |
+| Gemini | `gemini` | `GEMINI_API_KEY` | `GEMINI_MODEL` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL` |
 
-Valorile implicite sunt centralizate în `interpretation/config.py`:
+Dacă `VLM_PROVIDER` lipsește, aplicația pornește cu `openrouter`. Dacă variabila modelului lipsește, lansatorul folosește `DEFAULT_MODELS` din `interpretation/config.py`. Aceste valori sunt configurația proiectului; disponibilitatea modelelor, limitele și costurile depind de furnizor.
 
-| Constantă | Rol |
-|---|---|
-| `DEFAULT_MODEL` | Modelul folosit implicit |
-| `DEFAULT_LANGUAGE` | Limba descrierilor |
-| `DEFAULT_DOMAIN_CONTEXT` | Domeniul folosit pentru ghidarea observației vizuale |
+Variabilele deja definite în mediul procesului au prioritate față de `.env`. Fișierul `.env` este exclus din Git. Repornește aplicația după schimbarea cheilor sau a configurației de pornire.
 
-Configurația actuală folosește limba engleză și domeniul încondeierii ouălor. Pentru testarea fără domeniu, setează `DEFAULT_DOMAIN_CONTEXT = ""`. Repornește aplicația după modificarea configurației.
+### Configurația interpretării
 
-Domeniul poate ghida atenția modelului, dar nu confirmă prezența unui obiect, material sau procedeu. El este independent de ontologia încărcată.
+| Element | Locație | Rol |
+|---|---|---|
+| `DEFAULT_MODELS` | `interpretation/config.py` | Modelul inițial pentru fiecare furnizor |
+| `DEFAULT_LANGUAGE` | `interpretation/config.py` | Limba implicită: română |
+| `DEFAULT_DOMAIN_CONTEXT` | `interpretation/config.py` | Domeniul implicit: încondeierea ouălor |
+| `DEFAULT_MIN_REQUEST_INTERVAL_SECONDS` | `interpretation/config.py` | Intervalul minim între începuturile cererilor: 13 secunde |
+| `InterpretationConfig.max_output_tokens_per_image` | `interpretation/config.py` | Bugetul de ieșire folosit la calcularea limitei cererii: 4.096 de tokeni per imagine |
+| `MAX_GROUP_SIZE` | `interpretation/contracts.py` | Limita aplicației: 4 imagini per cerere |
+| `PROMPT_VERSION` | `interpretation/prompting.py` | Versiunea instrucțiunilor de interpretare |
 
-Modelul poate fi modificat și în GUI. Interfața de test acceptă identificatori terminați în `:free`; disponibilitatea și limitele lor depind de OpenRouter.
+Furnizorul, modelul, limba, domeniul și numărul imaginilor per apel sunt editabile în GUI. Pentru interpretare fără context de domeniu, golește câmpul domeniului. Ontologia este activată separat.
 
-## Pornirea aplicației
+Limita totală de ieșire a unei cereri este bugetul per imagine înmulțit cu numărul imaginilor din grup. Consumul raportat de API aparține întregii cereri.
+
+## Pornire
 
 ### Interfața unificată
 
@@ -153,118 +144,141 @@ Modelul poate fi modificat și în GUI. Interfața de test acceptă identificato
 .\.venv\Scripts\python.exe run_workflow_gui.py
 ```
 
-Din PyCharm, selectează interpretul `.venv/Scripts/python.exe` și pornește `run_workflow_gui.py` cu **Run**.
+În PyCharm, selectează interpretul `.venv/Scripts/python.exe` și rulează `run_workflow_gui.py` cu **Run**.
 
-### Diagnosticarea extragerii
+### Diagnosticul extragerii
 
 ```powershell
 .\.venv\Scripts\python.exe run_diagnostics.py
 ```
 
-Acest lansator deschide interfața separată de extragere din `gui/app.py`, păstrată pentru diagnosticare. Monitorul încearcă să genereze suplimentar raportul `performance.json`.
+Lansatorul deschide interfața de extragere din `gui/app.py`, cu monitorizarea performanței. Monitorul încearcă să salveze `performance.json`; indisponibilitatea diagnosticului nu trebuie să oprească extragerea.
 
-Diagnosticarea nu include fluxul de descriere VLM. Monitorizarea poate introduce un cost suplimentar de execuție; pentru utilizarea obișnuită folosește interfața unificată.
+Această interfață nu include interpretarea VLM. Monitorizarea poate introduce un cost suplimentar de execuție; pentru utilizarea obișnuită folosește interfața unificată. Rulează diagnosticul fără un alt profiler activ.
 
-## Utilizarea interfeței unificate
+## Utilizare
 
-### Extragerea din video
+### 1. Alegerea sursei
 
-1. În **1. Sursă**, alege pornirea de la un videoclip și directorul rezultatelor.
-2. Configurează intervalul și limita de cadre. Pragul detectorului și procesele sunt în **Setări avansate de extragere**.
-3. Apasă **Extrage cadrele**.
-4. Aplicația deschide **2. Selectare imagini**.
+Pentru un videoclip, selectează fișierul și directorul rezultatelor. Configurează intervalul și limita opțională de cadre; pragul detectorului și procesele Katna sunt în **Setări avansate de extragere**. Apasă **Extrage cadrele**.
 
-### Încărcarea imaginilor existente
+Pentru imagini existente, alege **Am deja imagini**, apoi **Încarcă imaginile…**. Sunt acceptate JPEG, PNG și WEBP. Imaginile sunt folosite din locația originală, fără copiere, și nu primesc scene sau intervale temporale artificiale.
 
-În **1. Sursă**, alege **Am deja imagini**, apoi **Încarcă imaginile…**.
+### 2. Selectarea imaginilor
 
-Fișierele sunt utilizate din locația originală, fără copiere. Dacă le muți sau le ștergi, sesiunea nu le mai poate accesa. Pentru acestea nu sunt atribuite artificial scene sau intervale temporale.
+Apasă pe o miniatură pentru previzualizare și bifează imaginile relevante. Selecția pentru analiză este independentă de previzualizare. Apasă **Continuă cu … imagini**.
 
-### Selecția și descrierea
+### 3. Configurarea și pornirea interpretării
 
-1. În **2. Selectare imagini**, apasă pe miniaturi pentru previzualizare și bifează imaginile relevante.
-2. Apasă **Continuă cu … imagini**.
-3. În **3. Configurare interpretare**, verifică domeniul, limba și modelul; pregătește opțional contextul ontologic.
-4. Verifică rezumatul și apasă **Descrie cele … imagini**.
-5. În **4. Rezultate**, alege imaginea din listă și consultă **Descriere** sau **JSON-LD**.
+Alege furnizorul, modelul, limba, domeniul și numărul imaginilor per apel. Interfața folosește implicit grupuri de 3 imagini; sunt permise 1–4.
 
-Poți reveni între pași fără să pierzi selecția sau rezultatele.
+Pregătește opțional contextul ontologic, verifică rezumatul și apasă **Descrie cele … imagini**.
 
-Descrierea se execută secvențial pentru imaginile selectate. O eroare este asociată imaginii respective și nu oprește automat restul lotului.
+Grupurile sunt procesate succesiv. Fiecare imagine are propria observație; promptul cere interpretări independente, fără transferarea faptelor sau presupunerea continuității temporale între cadre.
 
-Observațiile existente sunt păstrate fără un nou apel dacă imaginea nu s-a schimbat și regenerarea nu este bifată. Pentru repetarea analizei, inclusiv după schimbarea modelului, domeniului sau contextului, bifează regenerarea în **4. Rezultate**, apoi revino la configurare.
+O eroare de pregătire poate afecta un singur cadru. O cerere eșuată sau un răspuns invalid poate afecta întregul grup; procesarea continuă cu grupurile următoare.
 
-### Ontologia
+Intervalul minim dintre cereri se măsoară între începuturile acestora. Durata apelului este inclusă în interval; nu se adaugă automat încă 13 secunde după răspuns.
 
-În **3. Configurare interpretare**, activează **Ghidează descrierea folosind o ontologie**.
-Încarcă fișierul RDF/XML, Turtle sau N-Triples, verifică namespace-ul propus (editabil)
-și apasă **Pregătește contextul**. Pentru un fișier cu extensie ambiguă, selectează explicit formatul.
+### 4. Examinarea și regenerarea rezultatelor
 
-Contextul pornește de la IRI-urile proprii și păstrează referințele externe relevante.
-Poți consulta și exporta Turtle-ul din **Vezi contextul și detaliile**.
-Schimbarea fișierului, formatului sau namespace-ului invalidează contextul pregătit.
-La pornirea analizei se verifică și dacă fișierul sursă s-a schimbat pe disc.
-Același context este folosit pentru toate imaginile din lot; fiecare observație păstrează
-textul și hash-ul contextului efectiv utilizat.
+În **Rezultate**, alege o imagine selectată și consultă filele **Descriere** și **JSON-LD**. Deselecția ascunde imaginea din lista rezultatelor, fără să șteargă observația din sesiune.
 
-Cu context activ, promptul cere denumiri de domeniu din vocabularul furnizat:
-etichete existente sau, în lipsa lor, numele locale din IRI. Termenii românești
-sunt păstrați și când limba descrierii este alta. Detaliile vizuale rămân în
-limbaj natural. Un obiect fără termen potrivit primește o descriere neutră,
-iar lipsa termenului sau identificarea incertă se consemnează în incertitudini.
-Relațiile structurate folosesc numai termeni de relație disponibili; dacă lipsesc,
-aranjamentul vizual este descris în text. Nu se clasifică indivizi și nu se
-populează ontologia în această etapă.
+Descrierile existente sunt păstrate fără apeluri noi dacă imaginile nu s-au schimbat și regenerarea nu este activată. Pentru refacerea lor, inclusiv după schimbarea modelului, furnizorului, domeniului, limbii sau ontologiei, activează **Regenerează și descrierile existente la următoarea analiză**.
 
-Acestea sunt instrucțiuni pentru model; validarea curentă verifică schema
-răspunsului, nu garantează respectarea vocabularului sau identificarea corectă.
+Dacă o regenerare eșuează, ultima observație validă este păstrată împreună cu eroarea ultimei încercări. Dacă imaginea s-a schimbat, reutilizarea observației este blocată până la regenerarea explicită.
 
-Încărcarea nu declanșează descriere, mapare sau inferență ontologică. Importurile externe declarate în ontologie nu sunt încărcate automat.
+Poți reveni între pași fără să pierzi selecția sau observațiile existente.
 
-### Salvarea
+### Salvarea și anularea
 
-Apasă **Salvează sesiunea…** sau **Salvează rezultatele…** și alege destinația.
+**Salvează sesiunea…** și **Salvează rezultatele…** salvează sesiunea în JSON-LD la destinația aleasă. Afișarea rezultatelor nu salvează automat fișierul.
 
-Sesiunea include toate imaginile și stările lor, selecția, observațiile disponibile, configurația curentă și contextul pregătit. Salvarea este explicită; afișarea descrierilor nu salvează automat sesiunea.
+Sesiunea include referințele către toate imaginile, selecția, stările, observațiile disponibile, configurația curentă și contextul pregătit. Imaginile nu sunt încorporate în JSON-LD; mutarea sau ștergerea lor afectează accesul ulterior.
 
-**Reîncărcarea unei sesiuni salvate nu este încă implementată în GUI.**
+**Oprește după operația curentă** solicită oprirea între operații. Un apel VLM sau o operație de extragere în curs poate trebui să se încheie; rezultatele primite până la oprire sunt păstrate. Salvează sesiunea pentru a le conserva.
 
-### Anularea
+**Reîncărcarea unei sesiuni JSON-LD în GUI nu este încă implementată.**
 
-**Oprește după operația curentă** solicită oprirea între operații. O operație de extragere sau o cerere VLM deja începută poate trebui să se încheie înainte de oprire.
+## Contextul ontologic
 
-Rezultatele obținute până atunci rămân disponibile. Pentru păstrarea observațiilor, salvează sesiunea.
+În pasul de configurare, activează **Ghidează descrierea folosind o ontologie**, încarcă fișierul, verifică namespace-ul propus și apasă **Pregătește contextul**.
+
+Pentru context sunt acceptate RDF/XML, Turtle și N-Triples. Pentru `.owl` se presupune RDF/XML; selectează explicit Turtle dacă fișierul are acel conținut. Namespace-ul propus este editabil și trebuie verificat.
+
+### Informații selectate
+
+Extragerea pornește de la IRI-urile din namespace-ul propriu și păstrează:
+
+- etichete, sinonime, definiții și comentarii recunoscute, dacă există;
+- declarații de tip selectate;
+- relații simple: subclasă, subproprietate, domeniu, interval și ierarhii SKOS;
+- metadatele disponibile ale termenilor externi referiți direct.
+
+Expresiile OWL complexe, regulile SWRL, metadatele administrative și relațiile din afara selecției simple sunt omise. Selecția este structurală, pe baza namespace-ului și a predicatelor; nu este o căutare a tripletelor relevante pentru fiecare imagine. Nu se execută inferență și nu se încarcă automat `owl:imports`.
+
+Contextul Turtle și raportul pot fi consultate în **Vezi contextul și detaliile**. Contextul poate fi exportat separat.
+
+### Reutilizarea sursei
+
+Citirea RDF, construirea catalogului, propunerea namespace-urilor și extragerea contextului sunt separate în pachetul `ontology`.
+
+La pregătirea contextului, fișierul este recitit pentru verificarea amprentei. Graful existent este reutilizat dacă fișierul, formatul și amprenta corespund sursei păstrate; altfel, sursa este parsată din nou. Schimbarea namespace-ului necesită refacerea selecției, fără să impună reparsarea unei surse neschimbate.
+
+Schimbarea fișierului, formatului sau namespace-ului invalidează contextul pregătit. La pornirea interpretării se verifică din nou amprenta fișierului, pentru a evita utilizarea unui context devenit neactual.
+
+### Rolul ontologiei în interpretare
+
+Pentru entitățile de domeniu identificate cu suficientă certitudine, promptul cere etichete furnizate de ontologie sau, în lipsa lor, numele locale din IRI. În descriere sunt permise forme gramaticale naturale ale termenilor.
+
+Identificările incerte folosesc denumiri neutre. Ipotezele despre identitate, materiale, activități sau etape trebuie susținute vizual, formulate cu precauție și explicate în `uncertainties`. Contextul de domeniu sau prezența unui termen în ontologie nu confirmă singure identificarea.
+
+Relațiile dintre entități sunt formulate în limbaj natural; nu sunt limitate la proprietățile ontologiei. Lipsa unui termen potrivit este diferențiată de incertitudinea vizuală.
+
+Acestea sunt instrucțiuni pentru model. Validarea structurii nu garantează corectitudinea vizuală sau respectarea terminologiei. Nu se creează indivizi și nu se populează ontologia în această etapă.
+
+## Observațiile și JSON-LD
+
+Clasele Pydantic definesc schema răspunsului, transmisă API-ului prin `response_format`. La primire sunt verificate structura, referințele dintre entități și corespondența rezultatelor cu imaginile trimise.
+
+O observație include `description`, `entities`, `relations`, `actions`, `visible_text` și `uncertainties`. Aplicația adaugă modelul, furnizorul, versiunea promptului, amprenta imaginii, configurația cererii și metadatele disponibile de consum.
+
+JSON-LD este construit local, cu identificatori absoluți și un context definit de aplicație. Proveniența fiecărei observații păstrează configurația efectiv folosită, separat de configurația curentă a sesiunii.
+
+La procesarea pe grupuri, durata și `usage.request_usage` aparțin întregii cereri. Observațiile din același grup pot repeta aceste metadate; consumul trebuie numărat o singură dată per cerere.
+
+Detalii despre schema exportului: [workflow/README.md](workflow/README.md).
 
 ## Cum funcționează extragerea
 
-PySceneDetect identifică scenele folosind `ContentDetector`. Aplicația comasează fragmentele mai scurte de 0,5 secunde, calculează numărul de cadre solicitate și exportă scenele selectate prin FFmpeg. Katna analizează clipurile și alege imaginile reprezentative.
+PySceneDetect identifică scenele folosind `ContentDetector`. Pipeline-ul comasează fragmentele mai scurte de 0,5 secunde, distribuie numărul solicitat de cadre și exportă scenele selectate prin FFmpeg. Katna alege imaginile reprezentative din fiecare clip.
 
-Dacă rezultă o singură scenă, videoclipul original este transmis direct către Katna.
+Dacă după comasare rezultă o singură scenă, videoclipul original este transmis direct către Katna. Scenele sunt procesate succesiv; Katna folosește intern procesare paralelă.
 
-Scenele sunt procesate succesiv. Katna folosește intern procesare paralelă, configurabilă din GUI.
-
-Fără limită globală:
+Fără limită globală, cererea pentru fiecare scenă este:
 
 ```text
 cadre solicitate = max(1, ceil(durata scenei / secunde per keyframe))
 ```
 
-Pentru un interval de 15 secunde, o scenă de 40 de secunde solicită trei cadre. Aceasta nu înseamnă extragerea unei imagini exact la fiecare 15 secunde; pozițiile sunt alese de Katna.
+Un interval de 15 secunde și o scenă de 40 de secunde solicită trei cadre. Intervalul controlează numărul solicitat, nu extragerea la momente temporale fixe.
 
-Dacă limita globală permite cel puțin un cadru pentru fiecare scenă, aplicația rezervă câte unul și distribuie restul proporțional cu cererea. Dacă limita este mai mică decât numărul scenelor, selectează scene distribuite pe durata videoclipului.
+Dacă limita permite câte un cadru pentru fiecare scenă, pipeline-ul rezervă aceste cadre și distribuie restul proporțional cu cererea suplimentară. Dacă limita este mai mică decât numărul scenelor, sunt selectate scene distribuite pe durata videoclipului.
 
-Limita este un plafon, nu o garanție: Katna poate furniza mai puține imagini decât cele solicitate.
+Limita este un plafon: Katna poate produce mai puține imagini decât cele solicitate. Numerotarea imaginilor nu garantează ordinea lor cronologică în interiorul scenei.
 
 | Parametru | Efect |
 |---|---|
 | Secunde de scenă / keyframe | Controlează numărul de cadre solicitate |
-| Limită cadre | Plafonează planul de extragere; câmpul gol dezactivează limita |
-| Prag detectare scene | Un prag mai mic produce, în general, mai multe delimitări |
-| Procese Katna | Controlează paralelismul intern; creșterea valorii nu garantează accelerarea |
+| Limită globală | Plafonează cererea; poate omite scene |
+| Prag detectare | Un prag mai mic produce, în general, mai multe delimitări |
+| Procese Katna | Controlează paralelismul intern; mai multe procese nu garantează accelerarea |
 
-Pragul intern pentru comasare este definit prin `MIN_SCENE_DURATION_SECONDS` în `extraction/pipeline.py`. Fereastra Katna este de 15 cadre, definită prin `KATNA_WINDOW_FRAMES` în `extraction/keyframe_extractor.py`. Acești parametri nu sunt expuși în GUI.
+Pragul comasării este `MIN_SCENE_DURATION_SECONDS` în `extraction/pipeline.py`. Fereastra Katna este `KATNA_WINDOW_FRAMES` în `extraction/keyframe_extractor.py`. Nu sunt editabile din GUI.
 
-## Rezultate și rapoarte
+`ExtractionSettings` validează parametrii numerici. Interfețele păstrează verificări suplimentare pentru prag, fișiere, destinație și capacitatea calculatorului; pipeline-ul și serviciile își verifică propriile condiții de executare.
+
+## Fișierele rezultate
 
 Fiecare extragere creează un director separat:
 
@@ -277,36 +291,35 @@ output/
     └── performance.json
 ```
 
-- `scenes/` conține clipurile exportate; poate lipsi pentru o singură scenă.
-- `keyframes/` conține imaginile organizate pe scene.
-- `manifest.json` conține setările, intervalele scenelor, cadrele, stările și erorile extragerii.
-- `performance.json` apare numai dacă diagnosticarea a fost activată și raportul a putut fi salvat.
-- `workflow_<session_id>.jsonld` este salvat separat, la destinația aleasă din GUI.
+| Fișier sau director | Conținut |
+|---|---|
+| `scenes/` | Clipurile exportate; poate lipsi când este folosit direct videoclipul original |
+| `keyframes/` | Imaginile extrase, organizate pe scene |
+| `manifest.json` | Configurația, intervalele scenelor, cadrele, stările și erorile extragerii |
+| `performance.json` | Diagnosticul opțional, dacă monitorizarea și salvarea raportului au reușit |
+| `workflow_<session_id>.jsonld` | Sesiunea, salvată separat la destinația aleasă în GUI |
 
-Manifestul este scris la încheierea controlată a extragerii. O închidere forțată poate lăsa rezultate fără raport final.
+Manifestul este actualizat pe parcursul extragerii și la final. O închidere forțată poate lăsa ultima stare salvată, fără finalizarea raportului.
 
-Intervalele temporale aparțin scenelor; momentul exact al fiecărui keyframe nu este disponibil. Numerotarea imaginilor nu garantează ordinea lor cronologică în scenă.
+Intervalele temporale aparțin scenelor. Momentul exact al fiecărui keyframe nu este disponibil.
 
-Raportul de performanță include timpi pentru detectare, export și extragere. Unele măsurători se suprapun și nu trebuie însumate ca etape independente. Raportul nu reprezintă o măsurare completă CPU/RAM.
-
-### Stările extragerii
-
-| Stare | Semnificație |
+| Stare a extragerii | Semnificație |
 |---|---|
 | `success` | Toate scenele selectate au produs cel puțin o imagine validă |
-| `partial` | Există imagini salvate, dar unele scene au eșuat |
+| `partial` | Există imagini valide, dar unele scene au eșuat |
 | `failed` | Eroare critică sau nicio imagine extrasă |
-| `cancelled` | Procesarea a fost anulată; rezultatele deja salvate sunt păstrate |
+| `cancelled` | Procesare oprită; rezultatele deja obținute sunt păstrate |
 
-Scenele omise intenționat prin limita globală nu fac automat rularea nereușită.
+Scenele omise intenționat prin limita globală nu reprezintă erori. Succesul tehnic al extragerii nu garantează relevanța semantică a imaginilor.
 
-Succesul tehnic confirmă obținerea imaginilor, nu relevanța lor semantică. Similar, validarea observațiilor verifică structura datelor și referințele, fără să garanteze corectitudinea descrierii vizuale.
+Raportul de performanță include timpi de detectare, export, extragere și selecție. Unele măsurători se suprapun și nu trebuie însumate ca etape independente. Nu reprezintă o măsurare completă CPU/RAM.
 
 ## Structura proiectului
 
 ```text
 VideoToKeyframes/
 ├── extraction/
+│   ├── factory.py
 │   ├── interfaces.py
 │   ├── models.py
 │   ├── scene_detector.py
@@ -315,44 +328,91 @@ VideoToKeyframes/
 │   └── performance_monitor.py
 ├── interpretation/
 │   ├── config.py
-│   ├── describe.py
+│   ├── contracts.py
+│   ├── images.py
+│   ├── jsonld_context.py
 │   ├── observations.py
-│   ├── ontology.py
+│   ├── prompting.py
+│   ├── service.py
+│   └── strategies/
+│       ├── base.py
+│       ├── factory.py
+│       ├── _chat_completions.py
+│       ├── openai.py
+│       ├── gemini.py
+│       └── openrouter.py
+├── ontology/
+│   ├── reader.py
 │   ├── models.py
-│   └── jsonld_context.py
+│   ├── catalog.py
+│   ├── context.py
+│   └── namespaces.py
 ├── workflow/
 │   ├── models.py
 │   ├── service.py
 │   ├── description.py
+│   ├── description_batch.py
 │   ├── jsonld.py
+│   ├── persistence.py
 │   └── README.md
 ├── gui/
 │   ├── workflow_app.py
 │   ├── keyframe_gallery.py
+│   ├── formatting.py
 │   └── app.py
+├── tests/
+│   ├── test_description_batches.py
+│   ├── test_interpretation_service.py
+│   ├── test_vlm_strategies.py
+│   └── test_workflow_gui.py
 ├── wheels/
 │   └── scenedetect_core-0.7.2-py3-none-any.whl
 ├── run_workflow_gui.py
 ├── run_diagnostics.py
+├── run_ontology_context_test.py
 ├── requirements.txt
 ├── README.md
 └── .gitignore
 ```
 
-Fișierele `__init__.py` ale pachetelor sunt omise din schemă.
+Fișierele `__init__.py` sunt omise din schemă.
 
-| Componentă | Responsabilitate |
+| Pachet | Responsabilitate |
 |---|---|
-| `extraction` | Detectarea scenelor, extragerea cadrelor și rapoartele |
-| `interpretation` | Apelul VLM, validarea observațiilor, configurația și încărcarea ontologiei |
-| `workflow` | Sesiunea, selecția, procesarea imaginilor și exportul JSON-LD |
-| `gui/workflow_app.py` | Interfața unificată și coordonarea operațiilor din fundal |
-| `gui/keyframe_gallery.py` | Miniaturi, paginare, selecție și previzualizare |
-| `gui/app.py` | Interfața de extragere păstrată pentru diagnosticare |
+| `extraction` | Construirea pipeline-ului, scenele, keyframe-urile și diagnosticul |
+| `interpretation` | Prompturile, contractele, strategiile VLM și validarea observațiilor |
+| `ontology` | Citirea RDF, catalogul, namespace-urile și contextul pentru interpretare |
+| `workflow` | Sesiunea, selecția, procesarea pe grupuri și salvarea JSON-LD |
+| `gui` | Interfețele, galeria, previzualizările și formatarea pentru afișare |
+| `tests` | Verificările automate ale comportamentelor implementate |
 
-Serviciile sunt separate de interfață pentru a putea fi reutilizate ulterior prin endpointuri API. API-ul și frontendul separat nu sunt încă implementate.
+Strategiile implementează un contract comun, iar funcțiile din modulele `factory.py` construiesc strategiile și pipeline-ul. Componentele detectorului și extractorului sunt injectate prin constructorul pipeline-ului.
 
-Pentru extrageri simultane într-un viitor API, modificarea configurației globale Katna va necesita izolare sau sincronizare.
+## Testare
+
+Rulează din rădăcina proiectului:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+```
+
+Suita verifică strategiile și parametrii cererilor, validarea răspunsurilor, selecția, fluxurile interfeței, contextul ontologic și reutilizarea grafului. Testele procesării pe grupuri verifică anularea, păstrarea observațiilor la regenerare eșuată, evitarea apelurilor inutile și respingerea unui grup cu rezultate invalide.
+
+Apelurile VLM sunt simulate. Testele automate nu consumă tokeni, nu verifică disponibilitatea reală a furnizorilor și nu evaluează calitatea descrierilor AI. Testele GUI necesită Tkinter și folosesc fișiere temporare locale.
+
+Extragerea video reală se verifică separat, în ambele interfețe. Pentru evaluarea interpretării sunt necesare exemple vizuale și apeluri reale la furnizori.
+
+`run_ontology_context_test.py` este un script manual pentru verificarea stabilității contextului și a parsării Turtle. Sursa și namespace-ul sunt configurate în acel fișier; scriptul nu face parte din suita automată și exportă în `output/ontology_context_reference/`.
+
+## Limitări și etape următoare
+
+- Maparea observațiilor la clasele și proprietățile ontologiei nu este implementată.
+- Nu este stabilită identitatea obiectelor sau continuitatea temporală între cadre.
+- Reîncărcarea sesiunilor salvate nu este disponibilă în GUI.
+- API-ul aplicației și un frontend separat nu sunt implementate.
+- Sesiunile conțin căi către imaginile locale, fără împachetarea acestora pentru transfer.
+- Limitele și erorile furnizorilor pot întrerupe cererile VLM; un răspuns valid structural poate conține interpretări incorecte.
+- Pentru extrageri simultane, configurația globală Katna și instanțele extractorului necesită izolare sau sincronizare.
 
 ## Întreținerea wheelului PySceneDetect
 
@@ -368,24 +428,20 @@ Reconstruire din rădăcina proiectului:
 .\.venv\Scripts\python.exe -m pip wheel --no-deps --wheel-dir .\wheels "https://github.com/Breakthrough/PySceneDetect/archive/7cd1005e8349d8e913d0930fc1750363eb4ddc51.zip"
 ```
 
-Operația necesită internet și nu este necesară pentru instalarea obișnuită dacă wheelul există deja.
-
-La actualizare trebuie reverificate metadatele, compatibilitatea cu OpenCV contrib și rezultatele extragerii. Actualizează și numele wheelului din `requirements.txt`, dacă se schimbă.
+Reconstruirea necesită internet și nu este necesară dacă wheelul existent este potrivit configurației. La actualizare, verifică metadatele, compatibilitatea cu OpenCV contrib și rezultatele extragerii, apoi actualizează calea din `requirements.txt` dacă numele fișierului se schimbă.
 
 ## Fișiere locale
 
-`.gitignore` exclude mediile virtuale, `.env`, rezultatele din `output/`, videoclipurile locale de test, fișierele temporare Katna și configurația PyCharm.
+`.gitignore` exclude `.venv/`, `.venv-test/`, `.env`, configurația PyCharm, fișierele Python generate, `output/`, `test_videos/` și fragmentele temporare Katna din `clipped/`.
 
-Exporturile salvate în alte directoare nu sunt automat excluse de regula pentru `output/`.
-
-Wheelul necesar instalării este păstrat în repository. Sesiunile JSON-LD conțin referințe la fișierele locale, nu copiile imaginilor; păstrează imaginile împreună cu rezultatele necesare.
+Exporturile salvate în alte directoare nu sunt excluse automat de regula pentru `output/`. Wheelul necesar instalării este păstrat în repository. Păstrează imaginile împreună cu datele necesare accesării rezultatelor salvate.
 
 ## Biblioteci principale
 
-- PySceneDetect și FFmpeg — detectarea scenelor și exportul clipurilor.
-- Katna și OpenCV — selecția și procesarea cadrelor.
-- Pillow și Tkinter — imaginile și interfața grafică.
-- HTTPX — comunicarea cu OpenRouter.
-- Pydantic — validarea observațiilor și a sesiunii.
-- RDFLib — încărcarea ontologiilor.
-- python-dotenv — încărcarea configurației locale din `.env`.
+- **PySceneDetect și FFmpeg:** detectarea scenelor și exportul clipurilor.
+- **Katna, OpenCV și NumPy:** procesarea video și selecția cadrelor.
+- **Pillow și Tkinter:** imaginile, previzualizările și interfața desktop.
+- **HTTPX:** comunicarea cu API-urile OpenAI, Gemini și OpenRouter.
+- **Pydantic:** schemele JSON și validarea configurației, observațiilor și sesiunilor.
+- **RDFLib:** citirea și prelucrarea grafurilor ontologice.
+- **python-dotenv:** încărcarea configurației locale din `.env`.

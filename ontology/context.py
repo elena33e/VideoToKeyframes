@@ -9,11 +9,13 @@ from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.compare import to_canonical_graph
 from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
-from .ontology import (
+from ontology.catalog import (
     DEFINITION_PREDICATES,
     LABEL_PREDICATES,
     SYNONYM_PREDICATES,
 )
+
+from .reader import OntologySource, read_ontology_source
 
 
 EXTRACTION_VERSION = "rdf-vocabulary-v2"
@@ -235,8 +237,8 @@ def extract_ontology_context(
             )
         }
 
-    # Completăm doar metadatele termenilor externi direct referiți.
-    # Nu parcurgem restricții sau ierarhii externe suplimentare.
+    # Completare metadatele termenilor externi direct referiți
+    # Nu parcurge restricții sau ierarhii externe
     for iri in sorted(external_iris(context), key=str):
         for predicate, obj in eligible.predicate_objects(iri):
             if (
@@ -247,8 +249,8 @@ def extract_ontology_context(
 
     external = external_iris(context)
 
-    # Un termen poate exista numai într-o restricție omisă.
-    # Îl păstrăm în vocabular fără să inventăm declarații RDF.
+    # Un termen poate exista numai într-o restricție omisă
+    # Îl păstrăm în vocabular fără să inventăm declarații RDF
     vocabulary_only = sorted(
         str(iri) for iri in anchors - _uris(context)
     )
@@ -360,53 +362,69 @@ def build_ontology_context(
     *,
     rdf_format: str | None = None,
 ) -> OntologyContext:
-    """Citește un fișier local RDF/XML, Turtle sau N-Triples.
+    """Încarcă sursa și pregătește contextul ontologic."""
+    _, context = build_ontology_context_with_source(
+        path,
+        namespace,
+        rdf_format=rdf_format,
+    )
+    return context
 
-    Pentru un .owl cu conținut Turtle, transmite rdf_format="turtle".
-    Nu rezolvă owl:imports.
-    JSON-LD nu este acceptat în această primă versiune.
-    """
+
+def build_ontology_context_with_source(
+    path: str | Path,
+    namespace: str,
+    *,
+    rdf_format: str | None = None,
+    cached_source: OntologySource | None = None,
+) -> tuple[OntologySource, OntologyContext]:
+    """Pregătește contextul, reutilizând sursa când este actuală."""
     source = Path(path).expanduser().resolve(strict=True)
-
-    if not source.is_file():
-        raise ValueError(f"Nu este un fișier: {source}")
 
     selected_format = rdf_format or FORMATS.get(
         source.suffix.lower()
     )
 
-    if selected_format not in {"xml", "turtle", "nt"}:
+    if selected_format not in FORMATS.values():
         raise ValueError(
             "Folosește RDF/XML, Turtle sau N-Triples."
         )
 
-    raw = source.read_bytes()
+    loaded = read_ontology_source(
+        source,
+        rdf_format=selected_format,
+        cached_source=cached_source,
+    )
 
-    if not raw:
-        raise ValueError("Fișierul ontologiei este gol.")
+    context = build_context_from_source(
+        loaded,
+        namespace,
+    )
 
-    graph = Graph()
+    return loaded, context
 
-    try:
-        graph.parse(
-            data=raw,
-            format=selected_format,
-            publicID=source.as_uri(),
-        )
-    except Exception as exc:
+
+def build_context_from_source(
+    loaded: OntologySource,
+    namespace: str,
+) -> OntologyContext:
+    """Pregătește contextul fără să recitească sau să reparseze sursa."""
+    if loaded.rdf_format not in FORMATS.values():
         raise ValueError(
-            "Ontologia nu poate fi citită ca "
-            f"{selected_format}: {exc}"
-        ) from exc
+            "Folosește RDF/XML, Turtle sau N-Triples."
+        )
 
-    result = extract_ontology_context(graph, namespace)
+    result = extract_ontology_context(
+        loaded.graph,
+        namespace,
+    )
 
     return OntologyContext(
         turtle=result.turtle,
         report={
             **result.report,
-            "source_path": str(source),
-            "source_sha256": sha256(raw).hexdigest(),
-            "rdf_format": selected_format,
+            "source_path": str(loaded.path),
+            "source_sha256": loaded.source_sha256,
+            "rdf_format": loaded.rdf_format,
         },
     )

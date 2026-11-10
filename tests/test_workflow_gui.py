@@ -6,14 +6,14 @@ import threading
 import tkinter as tk
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from PIL import Image
 from rdflib import Graph
 
 from gui.workflow_app import WorkflowGUI
-from interpretation.ontology import load_ontology
-from interpretation.ontology_context import build_ontology_context
+from ontology.catalog import load_ontology_with_source
+from ontology.context import build_ontology_context_with_source
 from workflow.models import WorkflowSession
 from workflow.service import create_session_from_images
 
@@ -76,10 +76,20 @@ class WorkflowGUITest(unittest.TestCase):
 
     def prepare_context(self):
         self.app.use_ontology_var.set(True)
-        self.app._handle_event("result", ("ontology", load_ontology(self.ontology)))
+        self.app._handle_event(
+            "result",
+            ("ontology", load_ontology_with_source(self.ontology)),
+        )
         self.assertEqual(self.app.namespace_var.get(), NAMESPACE)
-        context = build_ontology_context(self.ontology, NAMESPACE)
-        self.app._handle_event("result", ("context", context))
+        source, context = build_ontology_context_with_source(
+            self.ontology,
+            NAMESPACE,
+            cached_source=self.app.ontology_source,
+        )
+        self.app._handle_event(
+            "result",
+            ("context", (source, context)),
+        )
         self.app._handle_event("done", None)
         return context
 
@@ -443,6 +453,25 @@ class WorkflowGUITest(unittest.TestCase):
         self.assertEqual(
             str(self.app.provider_combo["state"]),
             "readonly",
+        )
+
+    def test_context_reuses_unchanged_source_without_parsing(self):
+        source, _ = load_ontology_with_source(self.ontology)
+
+        with patch(
+            "ontology.reader.Graph.parse",
+            side_effect=AssertionError("Sursa nu trebuie reparsată."),
+        ):
+            reused, context = build_ontology_context_with_source(
+                self.ontology,
+                NAMESPACE,
+                cached_source=source,
+            )
+
+        self.assertIs(reused, source)
+        self.assertEqual(
+            context.report["source_sha256"],
+            source.source_sha256,
         )
 
 

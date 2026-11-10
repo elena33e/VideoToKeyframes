@@ -14,13 +14,20 @@ SESSION_BASE_IRI = (
 )
 
 # Configurația implicită pentru descrierea imaginilor.
-DEFAULT_MODEL = "nvidia/nemotron-3.5-super-vl:free"
+DEFAULT_MODELS = {
+    "gemini": "gemini-3.6-flash",
+    "openrouter": "nvidia/nemotron-3.5-super-vl:free",
+    "openai": "gpt-6.1-sol",
+}
 DEFAULT_LANGUAGE = "Romanian"
 
 # Pentru descriere fără context de domeniu, folosește "".
 DEFAULT_DOMAIN_CONTEXT = (
     "Traditional egg decorating (încondeierea ouălor)"
 )
+
+# Interval minim între începuturile a două cereri consecutive.
+DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 13.0
 
 @dataclass(frozen=True)
 class InterpretationConfig:

@@ -6,6 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from gui.workflow_app import launch_workflow_gui
+from interpretation.config import DEFAULT_MODELS
 
 
 def main():
@@ -23,18 +24,11 @@ def main():
     }
 
     model_defaults = {
-        "gemini": os.environ.get(
-            "GEMINI_MODEL",
-            "gemini-3.6-flash",
-        ),
-        "openrouter": os.environ.get(
-            "OPENROUTER_MODEL",
-            "nvidia/nemotron-3.5-super-vl:free",
-        ),
-        "openai": os.environ.get(
-            "OPENAI_MODEL",
-            "gpt-6.1-sol",
-        ),
+        provider: os.environ.get(
+            f"{provider.upper()}_MODEL",
+            default_model,
+        )
+        for provider, default_model in DEFAULT_MODELS.items()
     }
 
     initial_provider = os.environ.get(
