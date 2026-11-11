@@ -13,7 +13,7 @@ from scenedetect import (
     split_video_ffmpeg,
 )
 
-from interfaces import ISceneDetector, Scene
+from extraction.interfaces import ISceneDetector, Scene
 
 
 class PySceneDetectorService(ISceneDetector):

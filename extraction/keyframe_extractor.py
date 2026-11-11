@@ -7,7 +7,7 @@ import Katna.config as katna_config
 from Katna.video import Video
 from Katna.writer import KeyFrameDiskWriter
 
-from interfaces import IKeyframeExtractor
+from extraction.interfaces import IKeyframeExtractor
 
 
 # De testat cu mai multe valori!!

@@ -1,21 +1,29 @@
-import json
+
 import math
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from interfaces import (
+from extraction.interfaces import (
     IKeyframeExtractor,
     ISceneDetector,
     ProgressCallback,
+)
+
+from extraction.models import (
+    ExtractedFrame,
+    ExtractionError,
+    ExtractionResult,
+    ExtractionSettings,
+    SceneExtractionResult,
 )
 # Scenele mai scurte decât acest prag sunt comasate cu o scenă vecină
 MIN_SCENE_DURATION_SECONDS = 0.5
 
 class PipelineError(RuntimeError):
-    def __init__(self, message: str, result: dict):
+    def __init__(self, message: str, result: ExtractionResult):
         super().__init__(message)
         self.result = result
 
@@ -168,16 +176,14 @@ class VideoProcessingPipeline:
         return list(zip(ordered, counts))
 
     @staticmethod
-    def _save_manifest(result: dict) -> None:
-        """Salvează raportul fără a suprascrie direct versiunea anterioară."""
-        path = Path(result["manifest"])
-        temporary = path.with_suffix(".json.tmp")
-
+    def _save_manifest(result: ExtractionResult) -> None:
+        """Salvează manifestul folosind un fișier temporar."""
+        temporary = result.manifest.with_suffix(".json.tmp")
         temporary.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2),
+            result.model_dump_json(indent=2) + "\n",
             encoding="utf-8",
         )
-        temporary.replace(path)
+        temporary.replace(result.manifest)
 
     def run(
             self,
@@ -188,21 +194,16 @@ class VideoProcessingPipeline:
             cancel_event: Event | None = None,
             *,
             seconds_per_keyframe: float,
-    ) -> dict:
+    ) -> ExtractionResult:
         input_video = Path(input_video).resolve()
 
         if not input_video.is_file() or input_video.stat().st_size == 0:
-            raise ValueError(
-                "Selectează un fișier video existent și nevid."
-            )
+            raise ValueError("Selectează un fișier video existent și nevid.")
 
         if max_total_keyframes is not None and (
-                type(max_total_keyframes) is not int
-                or max_total_keyframes < 1
+                type(max_total_keyframes) is not int or max_total_keyframes < 1
         ):
-            raise ValueError(
-                "Limita totală trebuie să fie un întreg pozitiv."
-            )
+            raise ValueError("Limita totală trebuie să fie un întreg pozitiv.")
 
         if (
                 type(seconds_per_keyframe) not in (int, float)
@@ -213,9 +214,18 @@ class VideoProcessingPipeline:
                 "Intervalul pentru keyframes trebuie să fie pozitiv și finit."
             )
 
-        cancel = (
-            cancel_event if cancel_event is not None else Event()
+        settings = ExtractionSettings(
+            seconds_per_keyframe=seconds_per_keyframe,
+            min_scene_duration_seconds=MIN_SCENE_DURATION_SECONDS,
+            max_total_keyframes=max_total_keyframes,
+            threshold=getattr(self.scene_detector, "threshold", None),
+            max_workers=getattr(self.keyframe_extractor, "max_workers", None),
+            katna_window_frames=getattr(
+                self.keyframe_extractor, "window_frames", None
+            ),
         )
+
+        cancel = cancel_event if cancel_event is not None else Event()
 
         run_id = (
             f"{input_video.stem[:60]}_"
@@ -224,41 +234,14 @@ class VideoProcessingPipeline:
         run_dir = Path(base_output_dir).resolve() / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
 
-        result = {
-            "status": "running",
-            "input_video": str(input_video),
-            "output_dir": str(run_dir),
-            "manifest": str(run_dir / "manifest.json"),
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "settings": {
-                "allocation": "duration_density",
-                "seconds_per_keyframe": seconds_per_keyframe,
-                "min_scene_duration_seconds": MIN_SCENE_DURATION_SECONDS,
-                "max_total_keyframes": max_total_keyframes,
-                "threshold": getattr(
-                    self.scene_detector, "threshold", None
-                ),
-                "max_workers": getattr(
-                    self.keyframe_extractor, "max_workers", None
-                ),
-                "katna_window_frames": getattr(
-                    self.keyframe_extractor,
-                    "window_frames",
-                    None,
-                ),
-            },
-            "total_keyframes": 0,
-            "target_keyframes": 0,
-            "detected_scenes": 0,
-            "total_scenes": 0,
-            "selected_scenes": 0,
-            "processed_scenes": 0,
-            "covered_scenes": 0,
-            "omitted_scenes": 0,
-            "scenes": [],
-            "errors": [],
-            "message": "",
-        }
+        result = ExtractionResult(
+            run_id=run_id,
+            input_video=input_video,
+            output_dir=run_dir,
+            manifest=run_dir / "manifest.json",
+            started_at=datetime.now(timezone.utc),
+            settings=settings,
+        )
 
         def notify(message, current=0, total=0):
             if progress_callback is not None:
@@ -284,7 +267,8 @@ class VideoProcessingPipeline:
                         "Detectorul a returnat indici de scenă duplicați."
                     )
 
-                result["detected_scenes"] = len(scenes)
+                result.detected_scenes = len(scenes)
+
                 scenes = self._merge_short_scenes(
                     scenes,
                     min_duration=MIN_SCENE_DURATION_SECONDS,
@@ -296,48 +280,47 @@ class VideoProcessingPipeline:
                 max_total_keyframes,
             )
 
-            selected_ids = {
-                scene.index for scene, _ in allocation
+            requested_by_scene = {
+                scene.index: count
+                for scene, count in allocation
             }
 
-            result["total_scenes"] = len(scenes)
-            result["selected_scenes"] = len(allocation)
-            result["omitted_scenes"] = len(scenes) - len(allocation)
-            result["target_keyframes"] = sum(
-                count for _, count in allocation
-            )
+            result.total_scenes = len(scenes)
+            result.selected_scenes = len(allocation)
+            result.omitted_scenes = len(scenes) - len(allocation)
+            result.target_keyframes = sum(requested_by_scene.values())
 
-            records = {}
-
-            for scene in scenes:
-                record = {
-                    **asdict(scene),
-                    "status": (
+            records = {
+                scene.index: SceneExtractionResult(
+                    index=scene.index,
+                    start_seconds=scene.start_seconds,
+                    end_seconds=scene.end_seconds,
+                    start_frame=scene.start_frame,
+                    end_frame=scene.end_frame,
+                    status=(
                         "pending"
-                        if scene.index in selected_ids
+                        if scene.index in requested_by_scene
                         else "not_selected"
                     ),
-                    "requested_frames": 0,
-                    "images": [],
-                    "clip": None,
-                }
-                records[scene.index] = record
-                result["scenes"].append(record)
+                    requested_frames=requested_by_scene.get(scene.index, 0),
+                )
+                for scene in scenes
+            }
 
-            for scene, requested in allocation:
-                records[scene.index]["requested_frames"] = requested
-
+            result.scenes = tuple(records.values())
             self._save_manifest(result)
+
+            used_paths: set[Path] = set()
 
             for scene, requested in allocation:
                 if cancel.is_set():
                     break
 
                 record = records[scene.index]
-                record["status"] = "processing"
+                record.status = "processing"
 
-                current = result["processed_scenes"]
-                total = result["selected_scenes"]
+                current = result.processed_scenes
+                total = result.selected_scenes
 
                 self._save_manifest(result)
 
@@ -357,15 +340,15 @@ class VideoProcessingPipeline:
                             run_dir / "scenes" / f"scene_{scene.index:04d}",
                         )
 
-                    record["clip"] = str(clip_path)
+                    record.clip = Path(clip_path)
 
                     if cancel.is_set():
-                        record["status"] = "cancelled"
+                        record.status = "cancelled"
                         break
 
                     notify(
-                        f"Scena {scene.index}: "
-                        f"extragerea a maximum {requested} cadre…",
+                        f"Scena {scene.index}: extragerea a maximum "
+                        f"{requested} cadre…",
                         current,
                         total,
                     )
@@ -373,15 +356,14 @@ class VideoProcessingPipeline:
                     images = self.keyframe_extractor.extract_keyframes(
                         video_path=clip_path,
                         output_dir=(
-                                run_dir
-                                / "keyframes"
-                                / f"scene_{scene.index:04d}"
+                                run_dir / "keyframes" / f"scene_{scene.index:04d}"
                         ),
                         num_frames=requested,
                     )
 
                     images = [
-                        Path(path).resolve() for path in images
+                        Path(path).resolve()
+                        for path in images
                     ]
 
                     if not images or len(images) > requested:
@@ -390,8 +372,7 @@ class VideoProcessingPipeline:
                         )
 
                     if len(set(images)) != len(images) or any(
-                            not path.is_file()
-                            or path.stat().st_size == 0
+                            not path.is_file() or path.stat().st_size == 0
                             for path in images
                     ):
                         raise RuntimeError(
@@ -399,94 +380,100 @@ class VideoProcessingPipeline:
                             "lipsă, goale sau duplicate."
                         )
 
-                    record["images"] = [
-                        str(path.relative_to(run_dir))
-                        for path in images
-                    ]
-                    record["status"] = "success"
+                    if used_paths.intersection(images):
+                        raise RuntimeError(
+                            "O imagine a fost returnată pentru mai multe scene."
+                        )
 
-                    result["total_keyframes"] += len(images)
-                    result["covered_scenes"] += 1
+                    frames = tuple(
+                        ExtractedFrame(
+                            frame_id=f"{run_id}/{uuid4().hex}",
+                            scene_index=scene.index,
+                            image_path=path.relative_to(run_dir),
+                        )
+                        for path in images
+                    )
+
+                    record.frames = frames
+                    record.status = "success"
+
+                    used_paths.update(images)
+                    result.total_keyframes += len(frames)
+                    result.covered_scenes += 1
 
                 except Exception as exc:
-                    record["status"] = "failed"
-                    record["error"] = str(exc)
-                    result["errors"].append({
-                        "scene": scene.index,
-                        "message": str(exc),
-                    })
+                    record.status = "failed"
+                    record.error = str(exc)
 
-                result["processed_scenes"] += 1
+                    result.errors += (
+                        ExtractionError(
+                            scene=scene.index,
+                            message=str(exc),
+                        ),
+                    )
+
+                result.processed_scenes += 1
                 self._save_manifest(result)
 
                 notify(
-                    f"Scene procesate: "
-                    f"{result['processed_scenes']} / {total}. "
-                    f"Cadre salvate: {result['total_keyframes']}.",
-                    result["processed_scenes"],
+                    f"Scene procesate: {result.processed_scenes} / {total}. "
+                    f"Cadre salvate: {result.total_keyframes}.",
+                    result.processed_scenes,
                     total,
                 )
 
             if cancel.is_set():
-                for record in result["scenes"]:
-                    if record["status"] == "pending":
-                        record["status"] = "cancelled"
+                for record in result.scenes:
+                    if record.status == "pending":
+                        record.status = "cancelled"
 
-                result["status"] = "cancelled"
-                result["message"] = (
-                    "Procesare anulată. "
-                    "Rezultatele salvate au fost păstrate."
+                result.status = "cancelled"
+                result.message = (
+                    "Procesare anulată. Rezultatele salvate au fost păstrate."
                 )
 
-            elif result["total_keyframes"] == 0:
+            elif result.total_keyframes == 0:
                 raise RuntimeError(
                     "Nu s-a extras niciun cadru. Consultă raportul."
                 )
 
-            elif result["errors"]:
-                result["status"] = "partial"
-                result["message"] = (
+            elif result.errors:
+                result.status = "partial"
+                result.message = (
                     "Procesare finalizată cu erori în unele scene."
                 )
 
             else:
-                result["status"] = "success"
-                result["message"] = (
-                    "Procesare finalizată cu succes."
-                )
+                result.status = "success"
+                result.message = "Procesare finalizată cu succes."
 
-            if result["omitted_scenes"]:
-                result["message"] += (
-                    " Scene omise prin limita globală: "
-                    f"{result['omitted_scenes']}."
+            if result.omitted_scenes:
+                result.message += (
+                    f" Scene omise prin limita globală: {result.omitted_scenes}."
                 )
 
         except Exception as exc:
             failure = exc
-            result["status"] = "failed"
-            result["message"] = str(exc)
-            result["errors"].append({
-                "scene": None,
-                "message": str(exc),
-            })
+            result.status = "failed"
+            result.message = str(exc)
 
-        result["finished_at"] = (
-            datetime.now(timezone.utc).isoformat()
-        )
+            result.errors += (
+                ExtractionError(message=str(exc)),
+            )
+
+        result.finished_at = datetime.now(timezone.utc)
 
         try:
             self._save_manifest(result)
 
         except OSError as exc:
             failure = exc
-            result["status"] = "failed"
-            result["message"] = (
+            result.status = "failed"
+            result.message = (
                 f"Raportul rulării nu a putut fi salvat: {exc}"
             )
 
         if failure is not None:
-            raise PipelineError(
-                result["message"], result
-            ) from failure
+            raise PipelineError(result.message, result) from failure
 
         return result
