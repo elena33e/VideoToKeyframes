@@ -5,7 +5,7 @@ import json
 from .config import InterpretationConfig
 
 
-PROMPT_VERSION = "describe-v11-compact-grounded-inferences"
+PROMPT_VERSION = "describe-v12-previous-group-actions"
 
 
 SYSTEM_PROMPT = """
@@ -89,11 +89,18 @@ Return exactly one frames item per supplied FRAME_ID, copying it exactly,
 with that image's observation. Apply all rules independently; restart entity
 IDs at e1 per image. Do not transfer facts, objects or references across
 images, infer cross-image identity/temporal continuity, or give a shared summary.
+If previous_group_actions is supplied, treat it as fallible model-generated
+reference data. Use it only to choose among interpretations of an action or
+stage supported by visual cues in the current image. Explain those cues and
+remaining ambiguity in uncertainties. Ground all claims about current objects,
+materials, contact, and activity in the current image.
 """.strip()
 
 
 def build_prompts(
     config: InterpretationConfig,
+    *,
+    previous_group_actions: list[dict[str, str | bool]] | None = None,
 ) -> tuple[str, str]:
     """Returnează prompturile comune pentru interpretarea imaginilor."""
     sections = [SYSTEM_PROMPT]
@@ -103,12 +110,15 @@ def build_prompts(
 
     sections.append(BATCH_RULES)
 
-    reference = {
+    reference: dict[str, object] = {
         "language": config.language,
         "domain": config.domain_context.strip(),
         "ontology_namespace": config.ontology_namespace,
         "ontology_turtle": config.ontology_context,
     }
+
+    if previous_group_actions:
+        reference["previous_group_actions"] = previous_group_actions
 
     user_prompt = (
         f"Describe every supplied image in {config.language}. "

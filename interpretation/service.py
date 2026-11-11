@@ -22,6 +22,27 @@ from .observations import BatchResponse, FrameObservation
 from .prompting import PROMPT_VERSION, build_prompts
 from .strategies.base import VLMStrategy
 
+def _previous_group_actions(
+    previous_group: tuple[FrameObservation, ...],
+) -> list[dict[str, str | bool]]:
+    actions = []
+    for frame in previous_group:
+        for uncertain in (False, True):
+            action = next(
+                (item for item in frame.observation.actions
+                 if item.uncertain == uncertain),
+                None,
+            )
+            if action is not None:
+                description = " ".join(action.description.split())
+                if len(description) > 160:
+                    description = description[:159].rstrip() + "…"
+                actions.append({
+                    "description": description,
+                    "uncertain": uncertain,
+                })
+    return actions
+
 
 class BatchInterpretationService:
     """Contextul din patternul Strategy."""
@@ -37,6 +58,8 @@ class BatchInterpretationService:
     def describe_batch(
         self,
         frames: list[FrameInput],
+        *,
+        previous_group: tuple[FrameObservation, ...] = (),
     ) -> dict[str, FrameObservation]:
         """Generează și validează observațiile unui grup."""
 
@@ -74,7 +97,11 @@ class BatchInterpretationService:
                 raw
             ).hexdigest()
 
-        system_prompt, user_prompt = build_prompts(self._config)
+        previous_group_actions = _previous_group_actions(previous_group)
+        system_prompt, user_prompt = build_prompts(
+            self._config,
+            previous_group_actions=previous_group_actions,
+        )
 
         request = VLMRequest(
             system_prompt=system_prompt,
@@ -165,6 +192,10 @@ class BatchInterpretationService:
                     ),
                     "ontology_context": ontology_context,
                     "backend_provider": response.backend_provider,
+                    "previous_group_frame_ids": [
+                        item.frame_id for item in previous_group
+                    ],
+                    "previous_group_actions": previous_group_actions,
                     "batch": {
                         "id": group_id,
                         "size": len(frames),

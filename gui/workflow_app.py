@@ -1455,6 +1455,7 @@ class WorkflowGUI:
                     service,
                     batch_size=batch_size,
                     regenerate=regenerate,
+                    use_previous_group_context=False,
                     cancel_event=cancel,
             ):
                 emit("description_progress", event)

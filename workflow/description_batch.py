@@ -20,6 +20,7 @@ def describe_selected_batches(
     batch_size=3,
     min_interval_seconds=DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
     regenerate=False,
+    use_previous_group_context=False,
     cancel_event=None,
 ):
     if type(batch_size) is not int or not 1 <= batch_size <= MAX_GROUP_SIZE:
@@ -69,6 +70,8 @@ def describe_selected_batches(
             processed += 1
             yield progress("frame_failed", frame.frame_id)
 
+    previous_group: tuple[FrameObservation, ...] = ()
+
     last_started = None
     for offset in range(0, len(pending), batch_size):
         delay = 0.0 if last_started is None else max(
@@ -88,15 +91,23 @@ def describe_selected_batches(
             return
         try:
             last_started = monotonic()
-            results = describer.describe_batch(group)
+            if previous_group:
+                results = describer.describe_batch(
+                    group, previous_group=previous_group
+                )
+            else:
+                results = describer.describe_batch(group)
+
             if set(results) != {f.frame_id for f in group}:
                 raise ValueError("Rezultatele nu corespund grupului trimis.")
+
             # Validăm tot grupul înainte de a publica primul rezultat.
             results = {key: FrameObservation.model_validate(value) for key, value in results.items()}
             if any(results[f.frame_id].frame_id != f.frame_id or
                    results[f.frame_id].scene_index != f.scene_index for f in group):
                 raise ValueError("Metadatele observațiilor nu corespund cadrelor.")
         except Exception as exc:
+            previous_group = ()
             for frame in group:
                 current = _update_frame(current, frame.frame_id, "failed",
                                         error=f"{type(exc).__name__}: {exc}")
@@ -104,6 +115,10 @@ def describe_selected_batches(
                 processed += 1
                 yield progress("frame_failed", frame.frame_id)
         else:
+            if use_previous_group_context:
+                previous_group = tuple(
+                    results[frame.frame_id] for frame in group
+                )
             # Un apel în curs nu se anulează. Păstrăm rezultatele deja primite.
             for frame in group:
                 current = _update_frame(current, frame.frame_id, "completed",
