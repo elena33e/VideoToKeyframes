@@ -27,6 +27,7 @@ class EntityObservation(ObservationModel):
     features: list[NonEmptyText]
     location: NonEmptyText
     visibility: Literal["clear", "partial", "unclear"]
+    uncertain: bool | None = None
 
 
 class RelationObservation(ObservationModel):
@@ -35,6 +36,7 @@ class RelationObservation(ObservationModel):
     subject_id: NonEmptyText
     predicate: NonEmptyText
     object_id: NonEmptyText
+    uncertain: bool | None = None
 
 
 class ActionObservation(ObservationModel):
@@ -192,3 +194,26 @@ class BatchResponse(BaseModel):
     )
 
     frames: list[BatchItem]
+
+    @classmethod
+    def vlm_json_schema(cls) -> dict[str, Any]:
+        schema = cls.model_json_schema()
+        for observation_type in (EntityObservation, RelationObservation):
+            definition = schema["$defs"][observation_type.__name__]
+            definition["properties"]["uncertain"] = {"type": "boolean"}
+            definition["required"].append("uncertain")
+        return schema
+
+    @model_validator(mode="after")
+    def validate_uncertainty_markers(self) -> Self:
+        for frame in self.frames:
+            observation = frame.observation
+            if any(
+                item.uncertain is None
+                for item in (*observation.entities, *observation.relations)
+            ):
+                raise ValueError(
+                    f"Cadrul {frame.frame_id!r} are obiecte sau relații fără "
+                    "marcaj boolean de incertitudine."
+                )
+        return self

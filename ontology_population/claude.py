@@ -9,7 +9,7 @@ from .config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_TIMEOUT_SECONDS,
 )
-from .generation import GenerationError, GenerationResponse
+from .generation import GenerationError, GenerationResponse, GenerationStrategy
 
 MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2026-10-21"
@@ -18,7 +18,7 @@ class ClaudeError(GenerationError):
     """Cerere eșuată sau răspuns incomplet de la Claude."""
 
 
-class ClaudeClient:
+class ClaudeClient(GenerationStrategy):
     def __init__(
         self,
         *,

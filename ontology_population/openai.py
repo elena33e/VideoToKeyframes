@@ -9,13 +9,13 @@ from .config import (
     DEFAULT_OPENAI_MODEL,
     DEFAULT_TIMEOUT_SECONDS,
 )
-from .generation import GenerationError, GenerationResponse
+from .generation import GenerationError, GenerationResponse, GenerationStrategy
 
 
 MESSAGES_URL = "https://api.openai.com/v1/chat/completions"
 
 
-class OpenAIClient:
+class OpenAIClient(GenerationStrategy):
     def __init__(
         self,
         *,

@@ -107,7 +107,7 @@ class BatchInterpretationService:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             images=tuple(images),
-            response_schema=BatchResponse.model_json_schema(),
+            response_schema=BatchResponse.vlm_json_schema(),
             max_output_tokens=(
                 self._config.max_output_tokens_per_image
                 * len(frames)
