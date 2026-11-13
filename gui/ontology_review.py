@@ -3,7 +3,7 @@
 import argparse
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
@@ -12,7 +12,9 @@ from urllib.parse import unquote
 
 from rdflib import Graph, RDFS, URIRef, RDF
 from ontology_population.revision import GraphRevision, Relation
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from ontology_population.storage import save_review_report
 from ontology.models import OntologyConcept
 from ontology_population.review import (
     ReviewFrame,
@@ -159,6 +161,14 @@ class OntologyReview(ttk.Frame):
         self.selector = ttk.Combobox(self, state="readonly")
         self.selector.pack(fill="x", pady=(4, 12))
 
+        self.save_button = ttk.Button(
+            self,
+            text="Salvează revizia…",
+            command=self._save_review,
+            state="disabled",
+        )
+        self.save_button.pack(side="bottom", anchor="e", pady=(8, 0))
+
         body = ttk.Panedwindow(self, orient="horizontal")
         body.pack(fill="both", expand=True)
 
@@ -249,6 +259,41 @@ class OntologyReview(ttk.Frame):
         self.tree.bind("<<TreeviewSelect>>", self._show_individual)
         self.add_frames(frames)
 
+    def _save_review(self) -> None:
+        default_dir = Path(__file__).resolve().parents[1] / "output" / "ontology_reviews"
+        try:
+            default_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Salvarea reviziei", str(exc), parent=self)
+            return
+
+        filename = filedialog.asksaveasfilename(
+            parent=self,
+            title="Salvează revizia",
+            initialdir=str(default_dir),
+            initialfile="revizie.json",
+            defaultextension=".json",
+            filetypes=[("Raport de revizie", "*.json")],
+        )
+        if not filename:
+            return
+
+        path = Path(filename)
+        try:
+            save_review_report(path, self.frames, self.revisions)
+        except FileExistsError:
+            messagebox.showerror(
+                "Salvarea reviziei", "Alege un nume de fișier nou.", parent=self
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Salvarea reviziei", str(exc), parent=self)
+        else:
+            messagebox.showinfo(
+                "Revizie salvată",
+                f"Am salvat {len(self.frames)} grafuri în:\n{path}",
+                parent=self,
+            )
+
     def add_frames(self, frames: list[ReviewFrame]) -> None:
         first_load = not self.frames
         self.frames.extend(frames)
@@ -265,6 +310,10 @@ class OntologyReview(ttk.Frame):
             f"{index}. {frame.image_path.name if frame.image_path else frame.frame_id}"
             for index, frame in enumerate(self.frames, start=1)
         ])
+
+        if self.frames:
+            self.save_button.configure(state="normal")
+
         if first_load and self.frames:
             self.selector.current(0)
             self._show_frame()

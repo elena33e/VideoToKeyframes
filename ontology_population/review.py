@@ -16,7 +16,7 @@ import unicodedata
 
 from ontology.catalog import build_ontology_catalog
 from ontology.models import ConceptKind, OntologyConcept
-
+REVIEW_REPORT_VERSION = 1
 
 @dataclass(frozen=True)
 class ReviewFrame:
@@ -25,6 +25,11 @@ class ReviewFrame:
     image_path: Path | None
     observation: dict[str, Any]
     graph: Graph
+    session_id: str
+    image_sha256: str
+    ontology_source_sha256: str
+    entity_iris_by_source_id: dict[str, str]
+    population_provenance: dict[str, Any]
     vocabulary_issues: tuple[str, ...] | None = None
     ontology_classes: tuple[OntologyConcept, ...] = ()
 
@@ -54,6 +59,12 @@ def build_review_frames(
     *,
     ontology_source: OntologySource | None = None,
 ) -> list[ReviewFrame]:
+    if "review_version" in report:
+        if report["review_version"] != REVIEW_REPORT_VERSION:
+            raise ValueError("Versiune necunoscută a raportului de revizie.")
+        if report["session_id"] != session["session_id"]:
+            raise ValueError("Raportul de revizie aparține altei sesiuni.")
+
     if (
         ontology_source is not None
         and ontology_source.source_sha256 != report["ontology_source_sha256"]
@@ -93,6 +104,15 @@ def build_review_frames(
         raise ValueError("Raportul are grafuri fără sursă sau surse fără graf.")
 
     frames = []
+    batch_provenance = {
+        key: report[key]
+        for key in (
+            "provider", "requested_model", "model", "prompt_version",
+            "message_id", "ontology_turtle_sha256", "usage",
+        )
+        if key in report
+    }
+
     for analysis_id, candidate in graphs.items():
         source = sources[analysis_id]
         observation = observations.get(analysis_id)
@@ -116,6 +136,13 @@ def build_review_frames(
             image_path=image_paths.get(source["frame_id"]),
             observation=observation["observation"],
             graph=graph,
+            session_id=session["session_id"],
+            image_sha256=source["image_sha256"],
+            ontology_source_sha256=report["ontology_source_sha256"],
+            entity_iris_by_source_id=candidate.get("entity_iris_by_source_id", {}),
+            population_provenance=candidate.get(
+                "population_provenance", batch_provenance
+            ),
             vocabulary_issues=issues,
             ontology_classes=ontology_classes,
         ))
