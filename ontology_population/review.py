@@ -12,6 +12,10 @@ from rdflib.util import guess_format
 from ontology.reader import OntologySource, read_ontology_source
 
 from .validation import validate_candidate
+import unicodedata
+
+from ontology.catalog import build_ontology_catalog
+from ontology.models import ConceptKind, OntologyConcept
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,7 @@ class ReviewFrame:
     observation: dict[str, Any]
     graph: Graph
     vocabulary_issues: tuple[str, ...] | None = None
+    ontology_classes: tuple[OntologyConcept, ...] = ()
 
 
 def load_review_frames(
@@ -54,6 +59,15 @@ def build_review_frames(
         and ontology_source.source_sha256 != report["ontology_source_sha256"]
     ):
         raise ValueError("Ontologia aleasă diferă de cea folosită la populare.")
+
+    ontology_classes: tuple[OntologyConcept, ...] = ()
+    if ontology_source is not None:
+        catalog = build_ontology_catalog(ontology_source, include_individuals=False)
+        ontology_classes = tuple(
+            concept for concept in catalog.concepts
+            if ConceptKind.CLASS in concept.kinds
+        )
+
 
     observations = {
         observation["analysis_id"]: observation
@@ -103,6 +117,7 @@ def build_review_frames(
             observation=observation["observation"],
             graph=graph,
             vocabulary_issues=issues,
+            ontology_classes=ontology_classes,
         ))
 
     return frames
@@ -118,3 +133,25 @@ def individuals_by_class(graph: Graph) -> dict[URIRef, set[URIRef]]:
         ):
             groups.setdefault(class_iri, set()).add(individual)
     return groups
+
+def search_classes(
+    classes: tuple[OntologyConcept, ...], query: str
+) -> list[OntologyConcept]:
+    def normalize(text: str) -> str:
+        return "".join(
+            char for char in unicodedata.normalize("NFKD", text.casefold())
+            if not unicodedata.combining(char)
+        ).replace("_", " ").replace("-", " ")
+
+    words = normalize(query).split()
+    if not words:
+        return []
+
+    matches = []
+    for concept in classes:
+        names = [concept.iri, *(label.value for label in concept.labels)]
+        names.extend(synonym.value for synonym in concept.synonyms)
+        if any(all(word in name for word in words) for name in map(normalize, names)):
+            matches.append(concept)
+
+    return matches

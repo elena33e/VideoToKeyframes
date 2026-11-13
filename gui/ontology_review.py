@@ -3,7 +3,7 @@
 import argparse
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
@@ -13,20 +13,24 @@ from urllib.parse import unquote
 from rdflib import Graph, RDFS, URIRef, RDF
 from ontology_population.revision import GraphRevision, Relation
 
+from ontology.models import OntologyConcept
 from ontology_population.review import (
     ReviewFrame,
     individuals_by_class,
     load_review_frames,
+    search_classes
+
 )
+
+
+def _local_name(iri: str) -> str:
+    name = iri.rsplit("#", 1)[-1].rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return unquote(name) or iri
 
 
 def _label(graph: Graph, iri: URIRef) -> str:
     label = graph.value(iri, RDFS.label)
-    if label is not None:
-        return str(label)
-
-    local_name = str(iri).rsplit("#", 1)[-1].rsplit("/", 1)[-1].rsplit(":", 1)[-1]
-    return unquote(local_name) or str(iri)
+    return str(label) if label is not None else _local_name(str(iri))
 
 def _source_text(observation: dict[str, Any]) -> str:
     names = {
@@ -86,12 +90,67 @@ def _source_text(observation: dict[str, Any]) -> str:
     lines.extend(hypotheses or ["Nicio ipoteză în observația sursă."])
     return "\n".join(lines)
 
+class ClassSearchDialog(simpledialog.Dialog):
+    def __init__(self, parent: tk.Misc, classes: tuple[OntologyConcept, ...]) -> None:
+        self.classes = classes
+        self.matches: list[OntologyConcept] = []
+        self.result: URIRef | None = None
+        super().__init__(parent, title="Alege clasa nouă")
+
+    def body(self, master):
+        ttk.Label(master, text="Caută după nume, etichetă sau sinonim").pack(anchor="w")
+        self.query = tk.StringVar(master=self)
+        entry = ttk.Entry(master, textvariable=self.query, width=56)
+        entry.pack(fill="x", pady=6)
+
+        self.results = tk.Listbox(master, width=56, height=8, exportselection=False)
+        self.results.pack(fill="both", expand=True)
+
+        self.status = ttk.Label(master, text="Tastează pentru a căuta.", wraplength=450)
+        self.status.pack(anchor="w", pady=(6, 0))
+
+        self.query.trace_add("write", self._search)
+        self.results.bind("<<ListboxSelect>>", self._show_iri)
+        self.results.bind("<Double-Button-1>", self.ok)
+        return entry
+
+    def _search(self, *_args) -> None:
+        query = self.query.get()
+        self.matches = search_classes(self.classes, query)
+        self.results.delete(0, "end")
+
+        for concept in self.matches:
+            label = concept.labels[0].value if concept.labels else _local_name(concept.iri)
+            self.results.insert("end", label)
+
+        if not query.strip():
+            self.status.configure(text="Tastează pentru a căuta.")
+        elif not self.matches:
+            self.status.configure(text="Nicio clasă găsită.")
+        else:
+            self.status.configure(text="Alege o clasă din rezultate.")
+
+    def _show_iri(self, _event=None) -> None:
+        selection = self.results.curselection()
+        if selection:
+            self.status.configure(text=self.matches[selection[0]].iri)
+
+    def validate(self) -> bool:
+        if self.results.curselection():
+            return True
+        self.bell()
+        return False
+
+    def apply(self) -> None:
+        self.result = URIRef(self.matches[self.results.curselection()[0]].iri)
 
 class OntologyReview(ttk.Frame):
     def __init__(self, parent: tk.Misc, frames: list[ReviewFrame]) -> None:
         super().__init__(parent, padding=12)
         self.frames: list[ReviewFrame] = []
         self.individuals_by_row: dict[str, URIRef] = {}
+
+        self.types_by_row: dict[str, URIRef] = {}
 
         self.revisions: dict[str, GraphRevision] = {}
         self.relations_by_row: dict[str, Relation] = {}
@@ -121,6 +180,12 @@ class OntologyReview(ttk.Frame):
         tabs.add(detail_panel, text="Fișa individului")
         self.details = ScrolledText(detail_panel, wrap="word", state="disabled", width=45, height=6)
         self.details.pack(fill="both", expand=True)
+
+        self.change_type_button = ttk.Button(
+            detail_panel, text="Schimbă tipul…", state="disabled",
+            command=self._change_type,
+        )
+        self.change_type_button.pack(anchor="w", pady=(6, 0))
 
         relations_panel = ttk.Frame(detail_panel)
         relations_panel.pack(fill="both", expand=True, pady=(8, 0))
@@ -159,7 +224,7 @@ class OntologyReview(ttk.Frame):
 
         self.undo_button = ttk.Button(
             actions, text="Anulează ultima modificare", state="disabled",
-            command=self._undo_relation_removal,
+            command=self._undo_edit,
         )
         self.undo_button.pack(side="left", padx=(6, 0))
 
@@ -188,7 +253,13 @@ class OntologyReview(ttk.Frame):
         first_load = not self.frames
         self.frames.extend(frames)
         self.revisions.update({
-            frame.analysis_id: GraphRevision(frame.graph) for frame in frames
+            frame.analysis_id: GraphRevision(
+                frame.graph,
+                allowed_classes=frozenset(
+                    URIRef(concept.iri) for concept in frame.ontology_classes
+                ),
+            )
+            for frame in frames
         })
         self.selector.configure(values=[
             f"{index}. {frame.image_path.name if frame.image_path else frame.frame_id}"
@@ -207,7 +278,7 @@ class OntologyReview(ttk.Frame):
 
     def _show_frame(self, _event=None) -> None:
         frame = self.frames[self.selector.current()]
-        graph = frame.graph
+
         self._show_source(frame)
         issues = frame.vocabulary_issues
 
@@ -222,22 +293,35 @@ class OntologyReview(ttk.Frame):
             self.check_text,
             "Rezultatul pentru graful candidat inițial.\n\n" + text,
         )
+        self._render_tree()
+
+    def _render_tree(self, selection: tuple[URIRef, URIRef] | None = None) -> None:
+        graph = self._current_revision().graph
         self.tree.delete(*self.tree.get_children())
         self.individuals_by_row.clear()
+        self.types_by_row.clear()
 
         groups = individuals_by_class(graph)
+        selected_row = None
         for class_iri in sorted(groups, key=lambda iri: (_label(graph, iri).casefold(), iri)):
             class_row = self.tree.insert("", "end", text=_label(graph, class_iri), open=True)
+
             for individual in sorted(
                 groups[class_iri], key=lambda iri: (_label(graph, iri).casefold(), iri)
             ):
                 row = self.tree.insert(class_row, "end", text=_label(graph, individual))
                 self.individuals_by_row[row] = individual
+                self.types_by_row[row] = class_iri
 
-        self._set_text(self.details,(
-            "Selectează un individ din arbore."
-            if groups else "Graful nu conține indivizi clasificați."
-        ))
+                if selection and individual == selection[0]:
+                    if selected_row is None or class_iri == selection[1]:
+                        selected_row = row
+
+        if selected_row is not None:
+            self.tree.selection_set(selected_row)
+            self.tree.see(selected_row)
+
+        self._show_individual()
 
     def _show_source(self, frame: ReviewFrame) -> None:
         self.source_photo = None
@@ -307,6 +391,14 @@ class OntologyReview(ttk.Frame):
         can_undo = self.selector.current() >= 0 and self._current_revision().can_undo
         self.undo_button.configure(state="normal" if can_undo else "disabled")
 
+        can_change_type = (
+            self._selected_type() is not None
+            and bool(self._current_revision().allowed_classes)
+        )
+        self.change_type_button.configure(
+            state="normal" if can_change_type else "disabled"
+        )
+
     def _remove_selected_relation(self) -> None:
         selected = self.relation_table.selection()
         if selected and (relation := self.relations_by_row.get(selected[0])) is not None:
@@ -375,9 +467,40 @@ class OntologyReview(ttk.Frame):
         dialog.grab_set()
         choice.focus_set()
 
-    def _undo_relation_removal(self) -> None:
+    def _selected_type(self) -> tuple[URIRef, URIRef] | None:
+        selection = self.tree.selection()
+        if selection and (row := selection[0]) in self.types_by_row:
+            return self.individuals_by_row[row], self.types_by_row[row]
+        return None
+
+    def _change_type(self) -> None:
+        current_type = self._selected_type()
+        if current_type is None:
+            return
+
+        individual, old_class = current_type
+        revision = self._current_revision()
+        frame = self.frames[self.selector.current()]
+        classes = tuple(
+            concept for concept in frame.ontology_classes
+            if (individual, RDF.type, URIRef(concept.iri)) not in revision.graph
+        )
+        if not classes:
+            messagebox.showinfo(
+                "Schimbă tipul", "Nu există altă clasă disponibilă.", parent=self
+            )
+            return
+
+        dialog = ClassSearchDialog(self, classes)
+        if dialog.result is not None and revision.replace_type(
+                individual, old_class, dialog.result
+        ):
+            self._render_tree((individual, dialog.result))
+
+    def _undo_edit(self) -> None:
+        selection = self._selected_type()
         if self._current_revision().undo():
-            self._show_individual()
+            self._render_tree(selection)
 
 
 def main() -> None:
