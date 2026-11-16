@@ -3,7 +3,6 @@
 import argparse
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 

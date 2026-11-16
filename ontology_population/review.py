@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from rdflib import Dataset, Graph, OWL, RDF, URIRef
-
 from rdflib.util import guess_format
+from rdflib.term import Node
 
 from ontology.reader import OntologySource, read_ontology_source
 
@@ -33,6 +33,31 @@ class ReviewFrame:
     vocabulary_issues: tuple[str, ...] | None = None
     ontology_classes: tuple[OntologyConcept, ...] = ()
 
+@dataclass(frozen=True)
+class ReviewOntology:
+    source_sha256: str
+    classes: tuple[OntologyConcept, ...]
+    iris: frozenset[URIRef]
+    named_individuals: frozenset[Node]
+
+
+def prepare_review_ontology(source: OntologySource) -> ReviewOntology:
+    catalog = build_ontology_catalog(source, include_individuals=False)
+    return ReviewOntology(
+        source_sha256=source.source_sha256,
+        classes=tuple(
+            concept for concept in catalog.concepts
+            if ConceptKind.CLASS in concept.kinds
+        ),
+        iris=frozenset(
+            term for triple in source.graph for term in triple
+            if isinstance(term, URIRef)
+        ),
+        named_individuals=frozenset(
+            source.graph.subjects(RDF.type, OWL.NamedIndividual)
+        ),
+    )
+
 
 def load_review_frames(
     session_path: Path,
@@ -43,21 +68,21 @@ def load_review_frames(
     session = json.loads(session_path.read_text(encoding="utf-8-sig"))
     report = json.loads(report_path.read_text(encoding="utf-8-sig"))
 
-    ontology_source = None
+    review_ontology = None
     if ontology_path is not None:
         rdf_format = guess_format(ontology_path.name)
         if rdf_format is None:
             raise ValueError("Formatul ontologiei nu poate fi dedus din extensie.")
-        ontology_source = read_ontology_source(ontology_path, rdf_format=rdf_format)
+        source = read_ontology_source(ontology_path, rdf_format=rdf_format)
+        review_ontology = prepare_review_ontology(source)
 
-    return build_review_frames(session, report, ontology_source=ontology_source)
-
+    return build_review_frames(session, report, review_ontology=review_ontology)
 
 def build_review_frames(
     session: dict[str, Any],
     report: dict[str, Any],
     *,
-    ontology_source: OntologySource | None = None,
+    review_ontology: ReviewOntology | None = None
 ) -> list[ReviewFrame]:
     if "review_version" in report:
         if report["review_version"] != REVIEW_REPORT_VERSION:
@@ -66,19 +91,12 @@ def build_review_frames(
             raise ValueError("Raportul de revizie aparține altei sesiuni.")
 
     if (
-        ontology_source is not None
-        and ontology_source.source_sha256 != report["ontology_source_sha256"]
+            review_ontology is not None
+            and review_ontology.source_sha256 != report["ontology_source_sha256"]
     ):
         raise ValueError("Ontologia aleasă diferă de cea folosită la populare.")
 
-    ontology_classes: tuple[OntologyConcept, ...] = ()
-    if ontology_source is not None:
-        catalog = build_ontology_catalog(ontology_source, include_individuals=False)
-        ontology_classes = tuple(
-            concept for concept in catalog.concepts
-            if ConceptKind.CLASS in concept.kinds
-        )
-
+    ontology_classes = review_ontology.classes if review_ontology is not None else ()
 
     observations = {
         observation["analysis_id"]: observation
@@ -126,10 +144,13 @@ def build_review_frames(
         document = candidate["jsonld"]
         dataset = Dataset().parse(data=json.dumps(document), format="json-ld")
         graph = dataset.graph(URIRef(document["@id"]))
-        issues = (
-            tuple(validate_candidate(graph, ontology_source.graph))
-            if ontology_source is not None else None
-        )
+        issues = None
+        if review_ontology is not None:
+            issues = tuple(validate_candidate(
+                graph,
+                ontology_iris=review_ontology.iris,
+                known_individuals=review_ontology.named_individuals,
+            ))
         frames.append(ReviewFrame(
             analysis_id=analysis_id,
             frame_id=source["frame_id"],

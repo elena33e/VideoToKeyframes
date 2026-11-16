@@ -20,7 +20,7 @@ from ontology_population.config import (
     MAX_BATCH_SIZE,
 )
 from ontology_population.openai import OpenAIClient
-from ontology_population.review import build_review_frames
+from ontology_population.review import prepare_review_ontology, build_review_frames
 from ontology_population.session import iter_population_reports
 from ontology.reader import read_ontology_source
 
@@ -49,7 +49,7 @@ class OntologyWindow(ttk.Frame):
         self.events = Queue()
         self.stop = Event()
         self.review: OntologyReview | None = None
-        self.reports = []
+        self.received_groups = 0
         self.received = 0
 
         self.tabs = ttk.Notebook(self)
@@ -132,6 +132,7 @@ class OntologyWindow(ttk.Frame):
             self.provider.get(), model, int(self.batch_size.get()),
         )
         self.received = 0
+        self.received_groups = 0
         self.generate_button.configure(state="disabled")
         self.status.set("Se generează grafurile candidate…")
         Thread(target=self._generate, args=args, daemon=True).start()
@@ -168,6 +169,7 @@ class OntologyWindow(ttk.Frame):
 
             prefix, _, client_type = PROVIDERS[provider]
             client = client_type(api_key=os.getenv(f"{prefix}_API_KEY", ""), model=model)
+            review_ontology = prepare_review_ontology(ontology_source)
             reports = iter_population_reports(
                 session, ontology_source=ontology_source,
                 client=client, provider=provider, requested_model=model,
@@ -178,9 +180,9 @@ class OntologyWindow(ttk.Frame):
                 if report is None:
                     break
                 frames = build_review_frames(
-                    session, report, ontology_source=ontology_source
+                    session, report, review_ontology=review_ontology
                 )
-                self.events.put(("batch", (report, frames)))
+                self.events.put(("batch", frames))
         except Exception as exc:
             self.events.put(("error", str(exc)))
         else:
@@ -196,23 +198,22 @@ class OntologyWindow(ttk.Frame):
             return
 
         if kind == "batch":
-            report, frames = payload
+            frames = payload
             review = self.review
             if self.received == 0 or review is None:
                 if review is not None:
                     review.destroy()
                 self.review = OntologyReview(self.review_tab, frames)
                 self.review.pack(fill="both", expand=True)
-                self.reports.clear()
                 self.tabs.tab(self.review_tab, state="normal")
                 self.tabs.select(self.review_tab)
             else:
                 review.add_frames(frames)
 
-            self.reports.append(report)
+            self.received_groups += 1
             self.received += len(frames)
             self.status.set(
-                f"{self.received} grafuri disponibile după {len(self.reports)} grupuri."
+                f"{self.received} grafuri disponibile după {self.received_groups} grupuri."
             )
             self.poll_id = self.after(80, self._poll)
             return

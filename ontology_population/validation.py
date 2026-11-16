@@ -1,14 +1,15 @@
 """Verificări RDF pentru grafurile candidate."""
 
-from rdflib import Graph, OWL, RDF, RDFS, URIRef
+from rdflib import Graph, OWL, RDF, RDFS, URIRef, Node
 
 
-def validate_candidate(candidate: Graph, ontology: Graph) -> list[str]:
+def validate_candidate(
+    candidate: Graph,
+    *,
+    ontology_iris: frozenset[URIRef],
+    known_individuals: frozenset[Node],
+) -> list[str]:
     issues: list[str] = []
-    ontology_iris = {
-        term for triple in ontology for term in triple if isinstance(term, URIRef)
-    }
-    known_individuals = set(ontology.subjects(RDF.type, OWL.NamedIndividual))
 
     prefix = f"{candidate.identifier}:instance:"
     subjects = set(candidate.subjects())
