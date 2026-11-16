@@ -7,6 +7,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Thread
 from tkinter import filedialog, ttk
+from typing import Any
 
 from dotenv import load_dotenv
 from rdflib.util import guess_format
@@ -30,8 +31,15 @@ PROVIDERS = {
 
 
 class OntologyWindow(ttk.Frame):
-    def __init__(self, parent: tk.Misc) -> None:
+    def __init__(
+            self,
+            parent: tk.Misc,
+            *,
+            session_data: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(parent, padding=12)
+        self.session_data = session_data
+        self.poll_id: str | None = None
         self.session_path = tk.StringVar(master=self)
         self.ontology_path = tk.StringVar(master=self)
         self.provider = tk.StringVar(master=self, value="openai")
@@ -52,7 +60,15 @@ class OntologyWindow(ttk.Frame):
         self.tabs.add(form, text="Populare")
         self.tabs.add(self.review_tab, text="Revizie", state="disabled")
 
-        self._file_field(form, 0, "Exportul sesiunii", self.session_path, "*.jsonld")
+        if session_data is None:
+            self._file_field(form, 0, "Exportul sesiunii", self.session_path, "*.jsonld")
+        else:
+            ttk.Label(form, text="Sesiunea curentă").grid(
+                row=0, column=0, sticky="w", pady=5
+            )
+            self.ontology_path.set(session_data.get("ontology_path") or "")
+            self.status.set("Alege setările și pornește popularea.")
+
         self._file_field(
             form, 1, "Ontologie (implicit din sesiune)",
             self.ontology_path, "*.rdf *.owl *.ttl *.nt",
@@ -98,31 +114,53 @@ class OntologyWindow(ttk.Frame):
         self.model.set(os.getenv(f"{prefix}_MODEL") or default_model)
 
     def _start(self) -> None:
-        session_path = self.session_path.get().strip()
+        source = self.session_data
+        if source is None:
+            session_path = self.session_path.get().strip()
+            if not session_path:
+                self.status.set("Alege exportul sesiunii.")
+                return
+            source = Path(session_path)
+
         model = self.model.get().strip()
-        if not session_path or not model:
-            self.status.set("Alege exportul sesiunii și completează modelul.")
+        if not model:
+            self.status.set("Completează modelul.")
             return
 
         args = (
-            Path(session_path), self.ontology_path.get().strip(),
+            source, self.ontology_path.get().strip(),
             self.provider.get(), model, int(self.batch_size.get()),
         )
         self.received = 0
         self.generate_button.configure(state="disabled")
         self.status.set("Se generează grafurile candidate…")
         Thread(target=self._generate, args=args, daemon=True).start()
-        self.after(80, self._poll)
+        self.poll_id = self.after(80, self._poll)
 
-    def _generate(self, session_path, ontology_name, provider, model, batch_size) -> None:
+    def _generate(
+            self,
+            source: dict[str, Any] | Path,
+            ontology_name: str,
+            provider: str,
+            model: str,
+            batch_size: int,
+    ) -> None:
         try:
-            session = json.loads(session_path.read_text(encoding="utf-8-sig"))
-            ontology_name = ontology_name or session.get("ontology_path")
+            session = (
+                json.loads(source.read_text(encoding="utf-8-sig"))
+                if isinstance(source, Path) else source
+            )
+            session_ontology = session.get("ontology_path")
+            ontology_name = ontology_name or session_ontology
             if not ontology_name:
                 raise ValueError("Alege fișierul ontologiei.")
 
             ontology_path = Path(ontology_name)
-            rdf_format = guess_format(ontology_path.name)
+            rdf_format = None
+            if session_ontology and ontology_path == Path(session_ontology):
+                settings = session.get("interpretation_settings", {})
+                rdf_format = settings.get("rdf_format")
+            rdf_format = rdf_format or guess_format(ontology_path.name)
             if rdf_format is None:
                 raise ValueError("Alege o ontologie RDF/XML, Turtle sau N-Triples.")
 
@@ -149,10 +187,12 @@ class OntologyWindow(ttk.Frame):
             self.events.put(("done", None))
 
     def _poll(self) -> None:
+        self.poll_id = None
+
         try:
             kind, payload = self.events.get_nowait()
         except Empty:
-            self.after(80, self._poll)
+            self.poll_id = self.after(80, self._poll)
             return
 
         if kind == "batch":
@@ -174,7 +214,7 @@ class OntologyWindow(ttk.Frame):
             self.status.set(
                 f"{self.received} grafuri disponibile după {len(self.reports)} grupuri."
             )
-            self.after(80, self._poll)
+            self.poll_id = self.after(80, self._poll)
             return
 
         self.generate_button.configure(state="normal")
@@ -185,6 +225,9 @@ class OntologyWindow(ttk.Frame):
 
     def close(self) -> None:
         self.stop.set()
+        if self.poll_id is not None:
+            self.after_cancel(self.poll_id)
+            self.poll_id = None
         self.winfo_toplevel().destroy()
 
 

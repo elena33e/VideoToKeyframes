@@ -40,6 +40,8 @@ from interpretation.config import (
     DEFAULT_DOMAIN_CONTEXT,
 )
 from interpretation.contracts import MAX_GROUP_SIZE
+from gui.ontology_window import OntologyWindow
+from workflow.jsonld import session_to_jsonld
 
 STATUS_LABELS = {
     "pending": "Nedescris",
@@ -71,6 +73,7 @@ class WorkflowGUI:
         self._active_provider = initial_provider
 
         self.session = None
+        self.ontology_window: OntologyWindow | None = None
         self.ontology_path = None
         self.ontology_context = None
         self.selection_preview_photo = None
@@ -560,6 +563,10 @@ class WorkflowGUI:
             actions, "Salvează rezultatele…", self._save
         )
         self.results_save_button.pack(side="right")
+        self.ontology_button = ttk.Button(
+            actions, text="Populare și revizie…", command=self._open_ontology
+        )
+        self.ontology_button.pack(side="right", padx=(0, 8))
         body.pack(fill="both", expand=True)
 
     def _show_source_mode(self):
@@ -773,6 +780,9 @@ class WorkflowGUI:
         save_state = "normal" if self.session and not self.busy else "disabled"
         self.save_button.configure(state=save_state)
         self.results_save_button.configure(state=save_state)
+        self.ontology_button.configure(
+            state="normal" if self._can_open_ontology() else "disabled"
+        )
         self.generate_context_button.configure(
             state="normal" if not self.busy and self.ontology_path
             and self.namespace_var.get().strip() else "disabled"
@@ -1709,6 +1719,39 @@ class WorkflowGUI:
                 "Se așteaptă încheierea operației curente."
             )
             self._sync_controls()
+
+    def _can_open_ontology(self) -> bool:
+        return (
+            not self.busy
+            and self.session is not None
+            and any(
+                frame.selected
+                and frame.description_status == "completed"
+                and frame.observation is not None
+                for frame in self.session.frames
+            )
+        )
+
+    def _open_ontology(self) -> None:
+        if not self._can_open_ontology():
+            return
+
+        existing = self.ontology_window
+        if existing is not None and existing.winfo_exists():
+            existing.winfo_toplevel().lift()
+            return
+
+        session = session_to_jsonld(self._with_settings(self.session))
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Populare și revizie ontologică")
+        dialog.geometry("1000x650")
+        dialog.minsize(700, 420)
+
+        window = OntologyWindow(dialog, session_data=session)
+        window.pack(fill="both", expand=True)
+        dialog.protocol("WM_DELETE_WINDOW", window.close)
+        self.ontology_window = window
 
     def _save(self):
         if self.busy or self.session is None:

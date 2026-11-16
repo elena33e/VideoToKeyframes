@@ -45,17 +45,29 @@ class OpenAIClient(GenerationStrategy):
         ontology_turtle: str,
         user_prompt: str,
     ) -> GenerationResponse:
+        ontology_text = "Ontologia furnizată în Turtle:\n" + ontology_turtle
+        ontology_content: str | list[dict[str, object]] = ontology_text
+        cache_settings = {}
+
+        if self.model == "gpt-6.1-sol":
+            ontology_content = [
+                {
+                    "type": "text",
+                    "text": ontology_text,
+                    "prompt_cache_breakpoint": {"mode": "explicit"},
+                },
+            ]
+            cache_settings["prompt_cache_options"] = {"mode": "explicit"}
+
         payload = {
             "model": self.model,
             "max_completion_tokens": self._max_output_tokens,
             "response_format": {"type": "json_object"},
             "store": False,
+            **cache_settings,
             "messages": [
                 {"role": "developer", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": "Ontologia furnizată în Turtle:\n" + ontology_turtle,
-                },
+                {"role": "user", "content": ontology_content},
                 {
                     "role": "user",
                     "content": "Observațiile în JSON:\n" + user_prompt,
