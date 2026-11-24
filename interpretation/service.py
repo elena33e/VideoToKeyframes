@@ -173,7 +173,7 @@ class BatchInterpretationService:
 
         for frame in frames:
             results[frame.frame_id] = FrameObservation(
-                schema_version="1.0",
+                schema_version="1.1",
                 frame_id=frame.frame_id,
                 scene_index=frame.scene_index,
                 image_sha256=image_hashes[frame.frame_id],

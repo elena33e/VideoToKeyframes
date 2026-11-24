@@ -18,6 +18,14 @@ class ObservationModel(BaseModel):
         str_strip_whitespace=True,
     )
 
+class CharacteristicObservation(ObservationModel):
+    """O caracteristică observată, independentă de vocabularul domeniului."""
+
+    name: NonEmptyText
+    value: NonEmptyText
+    uncertain: bool
+
+
 
 class EntityObservation(ObservationModel):
     """Un obiect sau element vizibil în imagine."""
@@ -25,6 +33,9 @@ class EntityObservation(ObservationModel):
     id: NonEmptyText
     name: NonEmptyText
     features: list[NonEmptyText]
+    characteristics: list[CharacteristicObservation] = Field(
+        default_factory=list
+    )
     location: NonEmptyText
     visibility: Literal["clear", "partial", "unclear"]
     uncertain: bool | None = None
@@ -144,6 +155,15 @@ class FrameObservation(ObservationModel):
             entity["id"] = entity_iris[entity["id"]]
             entity["type"] = "EntityObservation"
 
+            for index, characteristic in enumerate(
+                entity["characteristics"],
+                start=1,
+            ):
+                characteristic["id"] = (
+                    f"{entity['id']}/characteristics/{index}"
+                )
+                characteristic["type"] = "CharacteristicObservation"
+
         for index, relation in enumerate(
             observation["relations"],
             start=1,
@@ -198,10 +218,20 @@ class BatchResponse(BaseModel):
     @classmethod
     def vlm_json_schema(cls) -> dict[str, Any]:
         schema = cls.model_json_schema()
-        for observation_type in (EntityObservation, RelationObservation):
+
+        for observation_type in (
+                EntityObservation,
+                RelationObservation,
+        ):
             definition = schema["$defs"][observation_type.__name__]
-            definition["properties"]["uncertain"] = {"type": "boolean"}
+            definition["properties"]["uncertain"] = {
+                "type": "boolean"
+            }
             definition["required"].append("uncertain")
+
+        schema["$defs"]["EntityObservation"]["required"].append(
+            "characteristics"
+        )
         return schema
 
     @model_validator(mode="after")

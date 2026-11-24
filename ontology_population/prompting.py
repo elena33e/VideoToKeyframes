@@ -1,6 +1,6 @@
 """Instrucțiunile generaliste pentru popularea ontologiei."""
 
-PROMPT_VERSION = "populate-v4-descriptive-instance-labels"
+PROMPT_VERSION = "populate-v5-structured-characteristics"
 
 SYSTEM_PROMPT = """
 SARCINĂ
@@ -16,6 +16,12 @@ obiect are o identificare incertă, poți păstra tipurile și relațiile
 susținute independent. Pentru uncertain=false, verifică în continuare
 sensul mapării. Când uncertain este null sau lipsește, folosește numai
 informațiile prezentate clar ca observații.
+
+CARACTERISTICI OBSERVATE
+Lista characteristics conține caracteristici ale apariției curente, cu name,
+value și uncertain. Nu trata o caracteristică uncertain=true ca fapt cert,
+chiar dacă identificarea entității are uncertain=false. Omiterea unei
+caracteristici înseamnă informație necunoscută, nu absență sau schimbare.
 
 VOCABULAR ȘI RELAȚII
 Folosește clasele și proprietățile de domeniu declarate sau referite

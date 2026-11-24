@@ -11,6 +11,10 @@ from ontology.reader import OntologySource
 from .config import MAX_BATCH_SIZE
 from .generation import GenerationStrategy
 from .service import PopulationObservation, populate_batch
+from interpretation.observations import (
+    CharacteristicObservation,
+    ImageObservation,
+)
 
 def _population_observation(saved: dict) -> PopulationObservation:
     source = saved["observation"]
@@ -22,8 +26,19 @@ def _population_observation(saved: dict) -> PopulationObservation:
     }
     data["entities"] = [
         {
-            **{key: value for key, value in entity.items() if key != "type"},
+            **{
+                key: value
+                for key, value in entity.items()
+                if key not in {"type", "characteristics"}
+            },
             "id": ids[entity["id"]],
+            "characteristics": [
+                {
+                    field: characteristic[field]
+                    for field in CharacteristicObservation.model_fields
+                }
+                for characteristic in entity.get("characteristics", [])
+            ],
         }
         for entity in data["entities"]
     ]

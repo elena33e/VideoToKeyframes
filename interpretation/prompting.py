@@ -5,7 +5,7 @@ import json
 from .config import InterpretationConfig
 
 
-PROMPT_VERSION = "describe-v13-uncertainty-markers"
+PROMPT_VERSION = "describe-v14-structured-characteristics"
 
 
 SYSTEM_PROMPT = """
@@ -40,6 +40,18 @@ FIELDS
   specific identification lacks support. Separate different visible roles,
   especially the hand holding an object from the hand holding a tool.
   Explicitly identify groups and avoid exact counts under blur or occlusion.
+- entities[].characteristics: a small set of visually supported attributes
+  useful for distinguishing appearances or describing their current state.
+  Each item has name, value and uncertain. Use concise attribute names and
+  values in the requested language; use consistent names for equivalent
+  attributes. Select attributes from the image, without a fixed domain list.
+  Describe the entity itself; keep its location in location and its activity
+  in actions. Do not assume an attribute is permanent or uniquely identifying.
+  Set uncertain=false for clearly visible values; true for visually supported
+  but ambiguous or approximate values, explaining the ambiguity in uncertainties.
+  Omit attributes whose values cannot be observed. Their omission means unknown,
+  not absent or changed. Use [] when no useful attributes can be supported.
+  Do not infer cross-image identity or fill values from ontology expectations.
 - relations: include relevant relations with clear subject -> object
   direction and concise natural-language predicates. Set uncertain=false
   for directly visible relations. Set uncertain=true for plausible relations
