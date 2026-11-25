@@ -5,7 +5,7 @@ import json
 from .config import InterpretationConfig
 
 
-PROMPT_VERSION = "describe-v14-structured-characteristics"
+PROMPT_VERSION = "describe-v16-compact-few-shot"
 
 
 SYSTEM_PROMPT = """
@@ -23,7 +23,7 @@ EVIDENCE
   color alone does not identify material. Static images do not establish
   movement, temporal order or a process sequence.
 - Distinguish observations from hypotheses. Qualify hypotheses wherever they
-  appear in prose/features/actions; explain supporting cues and unresolved
+  appear in prose/characteristics/actions; explain supporting cues and unresolved
   aspects in uncertainties. Prefer the best-supported interpretation; include
   alternatives only when supported and useful. Avoid invented details,
   filler hypotheses, generic disclaimers and repeated caveats.
@@ -32,7 +32,7 @@ FIELDS
 - description: one natural paragraph, normally 2-4 sentences, at most 100 words.
   Describe the scene, without analysis commentary, aesthetic judgments or
   generic cultural commentary.
-- entities: relevant objects only, with concise visible features, location
+- entities: relevant objects only, with concise visible characteristics, location
   and visibility. Use unique IDs e1, e2, etc. Set uncertain=false when the
   identification expressed in name is clear. Set uncertain=true when name
   is a tentative identification supported by visual cues. Explain those
@@ -40,18 +40,23 @@ FIELDS
   specific identification lacks support. Separate different visible roles,
   especially the hand holding an object from the hand holding a tool.
   Explicitly identify groups and avoid exact counts under blur or occlusion.
-- entities[].characteristics: a small set of visually supported attributes
-  useful for distinguishing appearances or describing their current state.
-  Each item has name, value and uncertain. Use concise attribute names and
-  values in the requested language; use consistent names for equivalent
-  attributes. Select attributes from the image, without a fixed domain list.
-  Describe the entity itself; keep its location in location and its activity
-  in actions. Do not assume an attribute is permanent or uniquely identifying.
-  Set uncertain=false for clearly visible values; true for visually supported
-  but ambiguous or approximate values, explaining the ambiguity in uncertainties.
-  Omit attributes whose values cannot be observed. Their omission means unknown,
-  not absent or changed. Use [] when no useful attributes can be supported.
-  Do not infer cross-image identity or fill values from ontology expectations.
+- entities[].characteristics: visually supported attributes of each relevant
+  entity, useful for comparing appearances and recording its observed state.
+  Cover useful visible details beyond color, including parts, patterns,
+  markings and surface condition when relevant. These are examples, not a
+  checklist: choose attributes from the image without a fixed list or count.
+  Each item has name, value and uncertain. Use one attribute per item and
+  specify the part it describes. Use concise names and values in the requested
+  language, with consistent names for equivalent attributes.
+  Keep scene location in location, activity in actions and inter-entity
+  relationships in relations. Do not assume permanence or uniqueness.
+  Assess each attribute's uncertainty independently of entity identification.
+  Use false for clearly visible values; true for visually supported but
+  ambiguous values, explaining important ambiguity in uncertainties.
+  Partial visibility permits describing visible parts. Omit unobservable
+  values; omission means unknown, not absent or changed. Use [] when no
+  useful attributes can be supported. Do not infer cross-image identity,
+  material from color/gloss alone, or values from ontology expectations.
 - relations: include relevant relations with clear subject -> object
   direction and concise natural-language predicates. Set uncertain=false
   for directly visible relations. Set uncertain=true for plausible relations
@@ -112,6 +117,34 @@ remaining ambiguity in uncertainties. Ground all claims about current objects,
 materials, contact, and activity in the current image.
 """.strip()
 
+CHARACTERISTICS_EXAMPLES = """
+CHARACTERISTICS EXAMPLES
+Hypothetical visual evidence -> JSON fragments. Actual responses must follow
+all fields of the supplied schema. Transfer the method, not example facts,
+attribute lists or counts. Examples use Romanian; follow the requested language.
+
+1. Visible: blue glossy container body, black handle; material unconfirmed.
+{"characteristics":[
+  {"name":"culoarea corpului","value":"albastru","uncertain":false},
+  {"name":"aspectul suprafeței corpului","value":"lucios","uncertain":false},
+  {"name":"culoarea mânerului","value":"negru","uncertain":false}
+]}
+
+2. Visible: folded textile; lighting makes its background white or cream.
+{"characteristics":[
+  {"name":"stare de pliere","value":"îndoit","uncertain":false},
+  {"name":"culoare de fond","value":"alb sau crem","uncertain":true}
+]}
+
+3. Visible: elongated dark-gray fragment; possibly a tool; texture unreadable.
+{"uncertain":true,"characteristics":[
+  {"name":"forma porțiunii vizibile","value":"alungită","uncertain":false},
+  {"name":"culoarea porțiunii vizibile","value":"gri închis","uncertain":false}
+]}
+Unobservable material/texture is omitted; uncertainty about the entity's
+identity does not make clearly visible attributes uncertain.
+""".strip()
+
 
 def build_prompts(
     config: InterpretationConfig,
@@ -123,6 +156,9 @@ def build_prompts(
 
     if config.ontology_context.strip():
         sections.append(ONTOLOGY_NAMING_RULES)
+
+    if config.use_characteristic_examples:
+        sections.append(CHARACTERISTICS_EXAMPLES)
 
     sections.append(BATCH_RULES)
 

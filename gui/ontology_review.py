@@ -40,14 +40,31 @@ def _source_text(observation: dict[str, Any]) -> str:
         )
         for entity in observation["entities"]
     }
-    entities = [
-        (
-                        f"{' — '.join([entity['name'], *entity['features']])}\n"
-            f"  Poziție: {entity['location']} · Vizibilitate: {entity['visibility']}",
-            entity.get("uncertain"),
-        )
-        for entity in observation["entities"]
-    ]
+    entities = []
+
+    for entity in observation["entities"]:
+        details = [
+            f"{item['name']}: {item['value']}"
+            + (" (incert)" if item["uncertain"] else "")
+            for item in entity.get("characteristics", [])
+        ]
+
+        if entity.get("features"):
+            details.append(
+                "Descriere din raportul vechi: "
+                + "; ".join(entity["features"])
+            )
+
+        text = "\n  ".join([
+            entity["name"],
+            *details,
+            (
+                f"Poziție: {entity['location']} · "
+                f"Vizibilitate: {entity['visibility']}"
+            ),
+        ])
+
+        entities.append((text, entity.get("uncertain")))
     relations = [
         (
             f"{names[relation['subject_id']]} — {relation['predicate']} — "

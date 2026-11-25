@@ -42,8 +42,14 @@ class InterpretationConfig:
     ontology_namespace: str = ""
     ontology_source_sha256: str = ""
     ontology_extraction_version: str = ""
+    use_characteristic_examples: bool = True
 
     def __post_init__(self):
+        if type(self.use_characteristic_examples) is not bool:
+            raise ValueError(
+                "use_characteristic_examples trebuie să fie bool."
+            )
+
         if not self.language.strip():
             raise ValueError("Limba descrierilor lipsește.")
 

@@ -12,8 +12,26 @@ def observation_text(result: FrameObservation) -> str:
     lines = [obs.description, "", "OBIECTE"]
 
     for entity in obs.entities:
+        marker = (
+            " (identificare incertă)"
+            if entity.uncertain is True
+            else ""
+        )
+        lines.append(f"• {entity.name}{marker}")
+
+        for item in entity.characteristics:
+            uncertainty = " (incert)" if item.uncertain else ""
+            lines.append(
+                f"  {item.name}: {item.value}{uncertainty}"
+            )
+
+        if entity.features:
+            lines.append(
+                "  Descriere din raportul vechi: "
+                + "; ".join(entity.features)
+            )
+
         lines.append(
-            f"• {entity.name}: {', '.join(entity.features)}\n"
             f"  Poziție: {entity.location}; "
             f"vizibilitate: {entity.visibility}"
         )
