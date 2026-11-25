@@ -46,6 +46,14 @@ _CONTEXT = {
         "@container": "@set",
     },
 
+    # Caracteristici structurate ale aparițiilor.
+    "CharacteristicObservation": "obs:CharacteristicObservation",
+    "characteristics": {
+        "@id": "obs:characteristics",
+        "@container": "@set",
+    },
+    "value": "obs:characteristicValue",
+
     # Entitățile observate.
     "name": "rdfs:label",
     "features": {

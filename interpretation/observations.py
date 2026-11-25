@@ -1,6 +1,6 @@
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, model_serializer
 
 from urllib.parse import quote
 from uuid import uuid4
@@ -18,15 +18,41 @@ class ObservationModel(BaseModel):
         str_strip_whitespace=True,
     )
 
+class CharacteristicObservation(ObservationModel):
+    """O caracteristică observată, independentă de vocabularul domeniului."""
+
+    name: NonEmptyText
+    value: NonEmptyText
+    uncertain: bool
+
+
 
 class EntityObservation(ObservationModel):
-    """Un obiect sau element vizibil în imagine."""
+    """O apariție observată; features este acceptat doar pentru date istorice."""
 
     id: NonEmptyText
     name: NonEmptyText
-    features: list[NonEmptyText]
+
+    features: list[NonEmptyText] = Field(default_factory=list)
+
+    characteristics: list[CharacteristicObservation] = Field(
+        default_factory=list
+    )
+
     location: NonEmptyText
     visibility: Literal["clear", "partial", "unclear"]
+    uncertain: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_entity(self, handler):
+        data = handler(self)
+
+        # Păstrăm câmpul numai dacă a fost prezent explicit în date.
+        # De sters dupa implementare si rulari viitoare!!
+        if "features" not in self.model_fields_set:
+            data.pop("features", None)
+
+        return data
 
 
 class RelationObservation(ObservationModel):
@@ -35,6 +61,7 @@ class RelationObservation(ObservationModel):
     subject_id: NonEmptyText
     predicate: NonEmptyText
     object_id: NonEmptyText
+    uncertain: bool | None = None
 
 
 class ActionObservation(ObservationModel):
@@ -142,6 +169,15 @@ class FrameObservation(ObservationModel):
             entity["id"] = entity_iris[entity["id"]]
             entity["type"] = "EntityObservation"
 
+            for index, characteristic in enumerate(
+                entity["characteristics"],
+                start=1,
+            ):
+                characteristic["id"] = (
+                    f"{entity['id']}/characteristics/{index}"
+                )
+                characteristic["type"] = "CharacteristicObservation"
+
         for index, relation in enumerate(
             observation["relations"],
             start=1,
@@ -192,3 +228,56 @@ class BatchResponse(BaseModel):
     )
 
     frames: list[BatchItem]
+
+    @classmethod
+    def vlm_json_schema(cls) -> dict[str, Any]:
+        schema = cls.model_json_schema()
+
+        entity_schema = schema["$defs"]["EntityObservation"]
+        entity_schema["properties"].pop("features")
+
+        for observation_type in (
+                EntityObservation,
+                RelationObservation,
+        ):
+            definition = schema["$defs"][observation_type.__name__]
+            definition["properties"]["uncertain"] = {
+                "type": "boolean"
+            }
+            definition["required"].append("uncertain")
+
+        schema["$defs"]["EntityObservation"]["required"].append(
+            "characteristics"
+        )
+        return schema
+
+    @model_validator(mode="after")
+    def validate_uncertainty_markers(self) -> Self:
+        for frame in self.frames:
+            observation = frame.observation
+
+            for entity in observation.entities:
+                if "features" in entity.model_fields_set:
+                    raise ValueError(
+                        "Răspunsurile VLM noi trebuie să folosească "
+                        "characteristics, fără features."
+                    )
+
+                if "characteristics" not in entity.model_fields_set:
+                    raise ValueError(
+                        "Lipsește lista characteristics din răspunsul VLM."
+                    )
+
+            if any(
+                    item.uncertain is None
+                    for item in (
+                            *observation.entities,
+                            *observation.relations,
+                    )
+            ):
+                raise ValueError(
+                    f"Cadrul {frame.frame_id!r} are obiecte sau relații fără "
+                    "marcaj boolean de incertitudine."
+                )
+
+        return self

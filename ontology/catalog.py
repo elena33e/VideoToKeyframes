@@ -166,19 +166,6 @@ def _extract_parents(
     return sorted(parents)
 
 
-def load_ontology(
-    path: str | Path,
-    *,
-    rdf_format: str | None = None,
-    include_individuals: bool = True,
-) -> OntologyCatalog:
-    """Încarcă o ontologie locală și returnează catalogul."""
-    _, catalog = load_ontology_with_source(
-        path,
-        rdf_format=rdf_format,
-        include_individuals=include_individuals,
-    )
-    return catalog
 
 
 def load_ontology_with_source(

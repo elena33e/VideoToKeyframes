@@ -107,7 +107,7 @@ class BatchInterpretationService:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             images=tuple(images),
-            response_schema=BatchResponse.model_json_schema(),
+            response_schema=BatchResponse.vlm_json_schema(),
             max_output_tokens=(
                 self._config.max_output_tokens_per_image
                 * len(frames)
@@ -173,7 +173,7 @@ class BatchInterpretationService:
 
         for frame in frames:
             results[frame.frame_id] = FrameObservation(
-                schema_version="1.0",
+                schema_version="1.2",
                 frame_id=frame.frame_id,
                 scene_index=frame.scene_index,
                 image_sha256=image_hashes[frame.frame_id],
@@ -187,6 +187,9 @@ class BatchInterpretationService:
                 parameters={
                     **response.request_parameters,
                     "language": self._config.language,
+                    "use_characteristic_examples": (
+                        self._config.use_characteristic_examples
+                    ),
                     "domain_context": (
                         self._config.domain_context.strip() or None
                     ),
