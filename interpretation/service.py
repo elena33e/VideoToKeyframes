@@ -98,7 +98,7 @@ class BatchInterpretationService:
             ).hexdigest()
 
         previous_group_actions = _previous_group_actions(previous_group)
-        system_prompt, user_prompt = build_prompts(
+        system_prompt, user_prompt, group_context = build_prompts(
             self._config,
             previous_group_actions=previous_group_actions,
         )
@@ -106,11 +106,12 @@ class BatchInterpretationService:
         request = VLMRequest(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            group_context=group_context,
             images=tuple(images),
             response_schema=BatchResponse.vlm_json_schema(),
             max_output_tokens=(
-                self._config.max_output_tokens_per_image
-                * len(frames)
+                    self._config.max_output_tokens_per_image
+                    * len(frames)
             ),
         )
 

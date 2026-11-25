@@ -4,7 +4,7 @@ from .base import VLMStrategy
 from .gemini import GeminiStrategy
 from .openai import OpenAIStrategy
 from .openrouter import OpenRouterStrategy
-
+from pathlib import Path
 
 def create_strategy(
     provider: str,
@@ -33,6 +33,12 @@ def create_strategy(
             model=model,
             timeout_seconds=timeout_seconds,
             reasoning_effort="low",
+            journal_directory=(
+                    Path(__file__).resolve().parents[2]
+                    / "output"
+                    / "diagnostics"
+                    / "http"
+            ),
         )
 
     raise ValueError(f"Furnizor necunoscut: {provider}")

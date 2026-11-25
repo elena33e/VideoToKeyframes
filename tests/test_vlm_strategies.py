@@ -12,6 +12,7 @@ from interpretation.contracts import (
 from interpretation.strategies.gemini import GeminiStrategy
 from interpretation.strategies.openrouter import OpenRouterStrategy
 from interpretation.strategies.openai import OpenAIStrategy
+from dataclasses import replace
 
 HTTP_POST = (
     "interpretation.strategies._chat_completions.httpx.post"
@@ -217,6 +218,105 @@ class VLMStrategiesTest(unittest.TestCase):
             8192,
         )
         self.assertNotIn("fake-key", repr(result))
+
+    def test_cache_boundary_and_provider_compatibility(self):
+        request = replace(
+            self.request,
+            group_context="Context variabil.",
+        )
+
+        strategies = [
+            (
+                OpenAIStrategy(
+                    api_key="fake-key",
+                    model="gpt-6.1-sol",
+                ),
+                True,
+            ),
+            (
+                OpenAIStrategy(
+                    api_key="fake-key",
+                    model="openai-test",
+                ),
+                False,
+            ),
+            (
+                GeminiStrategy(
+                    api_key="fake-key",
+                    model="gemini-test",
+                ),
+                False,
+            ),
+            (
+                OpenRouterStrategy(
+                    api_key="fake-key",
+                    model="provider/test",
+                ),
+                False,
+            ),
+        ]
+
+        for strategy, expected_cache in strategies:
+            with self.subTest(
+                provider=strategy.provider,
+                model=strategy.model,
+            ):
+                with patch(
+                    HTTP_POST,
+                    return_value=self.success_response(),
+                ) as post:
+                    result = strategy.generate(request)
+
+                payload = json.loads(
+                    post.call_args.kwargs["content"]
+                )
+                parts = payload["messages"][1]["content"]
+
+                self.assertEqual(
+                    parts[0]["text"], request.user_prompt
+                )
+                self.assertEqual(
+                    parts[1]["text"], request.group_context
+                )
+                self.assertTrue(
+                    parts[2]["text"].startswith("FRAME_ID: ")
+                )
+                self.assertEqual(
+                    parts[3]["type"], "image_url"
+                )
+
+                markers = [
+                    index
+                    for index, part in enumerate(parts)
+                    if "prompt_cache_breakpoint" in part
+                ]
+                self.assertEqual(
+                    markers,
+                    [0] if expected_cache else [],
+                )
+
+                if expected_cache:
+                    self.assertEqual(
+                        parts[0]["prompt_cache_breakpoint"],
+                        {"mode": "explicit"},
+                    )
+                    self.assertEqual(
+                        payload["prompt_cache_options"],
+                        {"mode": "explicit", "ttl": "30m"},
+                    )
+                    self.assertEqual(
+                        result.request_parameters[
+                            "prompt_cache_options"
+                        ],
+                        payload["prompt_cache_options"],
+                    )
+                else:
+                    self.assertNotIn(
+                        "prompt_cache_options", payload
+                    )
+
+
+
 
 
 if __name__ == "__main__":

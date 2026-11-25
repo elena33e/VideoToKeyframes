@@ -5,11 +5,12 @@ import json
 import math
 from time import perf_counter
 from typing import Any
+from pathlib import Path
 
 import httpx
 
 from ..contracts import VLMError, VLMRequest, VLMResponse
-
+from diagnostics.http_journal import post_with_journal
 
 # Limită conservatoare a aplicației, după codificarea Base64.
 MAX_REQUEST_BYTES = 18_000_000
@@ -80,15 +81,28 @@ def execute_chat_request(
     parameters: dict[str, Any],
     timeout_seconds: float,
     token_limit_parameter: str = "max_tokens",
+    cache_stable_prefix: bool = False,
+    journal_directory: Path | None = None,
 ) -> VLMResponse:
     """Execută o cerere fără să interpreteze observațiile generate."""
 
-    content = [
+    content: list[dict[str, Any]] = [
         {
             "type": "text",
             "text": request.user_prompt,
         }
     ]
+
+    if cache_stable_prefix:
+        content[0]["prompt_cache_breakpoint"] = {
+            "mode": "explicit",
+        }
+
+    if request.group_context:
+        content.append({
+            "type": "text",
+            "text": request.group_context,
+        })
 
     for image in request.images:
         encoded = base64.b64encode(image.data).decode("ascii")
@@ -110,6 +124,7 @@ def execute_chat_request(
 
     effective_parameters = {
         token_limit_parameter: request.max_output_tokens,
+
         **parameters,
     }
 
@@ -152,7 +167,7 @@ def execute_chat_request(
     started = perf_counter()
 
     try:
-        response = httpx.post(
+        response = post_with_journal(
             endpoint,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -163,6 +178,7 @@ def execute_chat_request(
                 timeout_seconds,
                 connect=min(15.0, timeout_seconds),
             ),
+            journal_directory=journal_directory,
         )
 
     except httpx.TimeoutException as exc:
