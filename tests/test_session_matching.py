@@ -18,7 +18,14 @@ from session_context.matching import (
     assess_frame_associations,
 )
 from session_context.persistence import load_session_context, save_session_context
-
+from session_context.matching import (
+    apply_automatic_associations,
+    assess_frame_associations,
+    assess_identity_candidate,
+)
+from session_context.identity_criteria import IdentityCriteria
+from session_context.type_alignment import SessionTypeMapper
+from test_ontology_alignment import NS, make_source
 
 CTX = fixtures.CTX
 NAMES = ("culoare", "formă")
@@ -191,12 +198,29 @@ class SessionMatchingTest(unittest.TestCase):
         self.assertEqual((), self.apply())
         self.assertIsNone(object_for_occurrence(self.context, other))
 
-    def test_concordant_candidate_has_priority_over_a_changed_alternative(self):
+    def test_changed_alternative_blocks_automatic_association(self):
         other = self.add("frame-1", "other")
         self.chars(other, "roșu")
+
+        before = set(self.context.identities)
         result = self.assess()[0]
-        self.assertEqual("automatic", result.action)
-        self.assertEqual(self.a, result.candidates[0].reference_iri)
+
+        self.assertEqual("unresolved", result.action)
+        self.assertEqual("multiple_candidates", result.reason)
+        self.assertEqual(
+            {self.a, other},
+            {
+                candidate.reference_iri
+                for candidate in result.candidates
+            },
+        )
+        self.assertTrue(any(
+            candidate.comparison.requires_confirmation
+            for candidate in result.candidates
+        ))
+
+        self.assertEqual((), self.apply())
+        self.assertEqual(before, set(self.context.identities))
 
     def test_invalid_frames_and_policy_are_rejected(self):
         for reference, current in (("frame-1", "frame-1"), ("unknown", "frame-2")):
@@ -232,6 +256,163 @@ class SessionMatchingTest(unittest.TestCase):
         self.assertEqual(2, len(calls))
         self.assertEqual(
             before, set(self.context.dataset.quads((None, None, None, None)))
+        )
+
+
+    def assess_candidate(
+        self,
+        ontology_body,
+        left_name="element",
+        right_name="element finisat",
+    ):
+        self.context.observations.set((
+            self.a,
+            RDFS.label,
+            Literal(left_name),
+        ))
+        self.context.observations.set((
+            self.b,
+            RDFS.label,
+            Literal(right_name),
+        ))
+
+        mapper = SessionTypeMapper(
+            make_source(ontology_body)
+        )
+        criteria = IdentityCriteria(
+            criteria_id="test-criteria",
+            version="1",
+            scope_description="Entitățile din scenariul de test.",
+            justification="Criterii explicite pentru comparație.",
+            validated_by="test-reviewer",
+            characteristics=NAMES,
+            required_characteristics=NAMES,
+        )
+
+        before = set(
+            self.context.dataset.quads((None, None, None, None))
+        )
+
+        result = assess_identity_candidate(
+            self.context,
+            self.a,
+            self.b,
+            mapper=mapper,
+            criteria=criteria,
+            language="ro",
+        )
+
+        self.assertEqual(
+            before,
+            set(self.context.dataset.quads(
+                (None, None, None, None)
+            )),
+        )
+
+        return result
+
+    def test_candidate_with_different_names_keeps_subclass_evidence(self):
+        result = self.assess_candidate("""
+            ex:A a owl:Class ;
+                rdfs:label "element"@ro .
+
+            ex:B a owl:Class ;
+                rdfs:label "element finisat"@ro ;
+                rdfs:subClassOf ex:A .
+        """)
+
+        types = result.type_comparison
+
+        self.assertEqual(
+            NS + "A",
+            types.left.alignment.candidates[0].class_iri,
+        )
+        self.assertEqual(
+            NS + "B",
+            types.right.alignment.candidates[0].class_iri,
+        )
+        self.assertEqual(1, len(types.class_relations))
+
+        relation = types.class_relations[0]
+
+        self.assertIsNone(relation.left_to_right)
+        self.assertEqual(1, len(relation.right_to_left))
+        self.assertEqual(
+            "consistent",
+            result.characteristics.status,
+        )
+
+    def test_unmapped_types_do_not_remove_characteristic_evidence(self):
+        result = self.assess_candidate("""
+            ex:Other a owl:Class ;
+                rdfs:label "alt concept"@ro .
+        """)
+
+        types = result.type_comparison
+
+        self.assertEqual("unmapped", types.left.alignment.status)
+        self.assertEqual("unmapped", types.right.alignment.status)
+        self.assertEqual((), types.class_relations)
+
+        self.assertEqual(
+            "consistent",
+            result.characteristics.status,
+        )
+        self.assertEqual(
+            self.a,
+            result.characteristics.comparison.left_occurrence_iri,
+        )
+        self.assertEqual(
+            self.b,
+            result.characteristics.comparison.right_occurrence_iri,
+        )
+
+    def test_ambiguous_types_keep_all_class_pairs(self):
+        result = self.assess_candidate("""
+            ex:A a owl:Class ;
+                rdfs:label "element"@ro .
+            ex:B a owl:Class ;
+                rdfs:label "element"@ro .
+
+            ex:C a owl:Class ;
+                rdfs:label "element finisat"@ro .
+            ex:D a owl:Class ;
+                rdfs:label "element finisat"@ro .
+        """)
+
+        types = result.type_comparison
+
+        self.assertEqual("ambiguous", types.left.alignment.status)
+        self.assertEqual("ambiguous", types.right.alignment.status)
+        self.assertEqual(
+            {
+                (NS + "A", NS + "C"),
+                (NS + "A", NS + "D"),
+                (NS + "B", NS + "C"),
+                (NS + "B", NS + "D"),
+            },
+            {
+                (report.left_iri, report.right_iri)
+                for report in types.class_relations
+            },
+        )
+
+    def test_declared_disjointness_is_preserved_with_visual_concordance(self):
+        result = self.assess_candidate("""
+            ex:A a owl:Class ;
+                rdfs:label "element"@ro ;
+                owl:disjointWith ex:B .
+
+            ex:B a owl:Class ;
+                rdfs:label "element finisat"@ro .
+        """)
+
+        relation = result.type_comparison.class_relations[0]
+
+        self.assertEqual(1, len(relation.declared_disjoint))
+        self.assertEqual(
+            "consistent",
+            result.characteristics.status,
         )
 
 
