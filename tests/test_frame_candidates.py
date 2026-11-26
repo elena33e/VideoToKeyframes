@@ -203,18 +203,20 @@ class FrameCandidatesTest(unittest.TestCase):
             result[other][0].characteristics.status,
         )
 
-    def test_missing_or_extraneous_criteria_are_rejected(self):
+    def test_extraneous_criteria_are_rejected(self):
         for selected in (
-            {},
-            {self.a: self.criteria},
-            {
-                self.a: self.criteria,
-                self.b: self.criteria,
-            },
+                {self.a: self.criteria},
+                {
+                    self.a: self.criteria,
+                    self.b: self.criteria,
+                },
         ):
             with self.subTest(selected=selected):
                 with self.assertRaises(ValueError):
                     self.assess(selected)
+
+    def test_no_criteria_produces_no_pair_comparisons(self):
+        self.assertEqual({}, self.assess({}))
 
     def test_invalid_frame_selection_is_rejected(self):
         for reference, current in (

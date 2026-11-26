@@ -2,6 +2,7 @@
 
 import hashlib
 import tkinter as tk
+import json
 from collections.abc import Collection, Mapping
 from datetime import timezone
 from io import BytesIO
@@ -10,9 +11,19 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageOps, ImageTk
-from rdflib import DCTERMS, RDF, RDFS, Literal, Namespace
+from rdflib import DCTERMS, RDF, RDFS, Literal, Namespace, URIRef
 from rdflib.compare import isomorphic
 from unicodedata import normalize
+from pydantic import TypeAdapter
+
+from ontology.reader import read_ontology_source
+from session_context.evaluation_graph import (
+    identity_evaluation_is_current,
+    record_frame_identity_evaluation,
+)
+from session_context.identity import AbsoluteIRI
+from session_context.identity_criteria import IdentityCriteria
+from session_context.type_alignment import SessionTypeMapper
 
 from interpretation.config import OBSERVATION_NAMESPACE
 from session_context.graph import build_session_context, entities_for_frame
@@ -23,8 +34,9 @@ from session_context.identity_graph import (
 )
 from session_context.matching import (
     AssociationAssessment,
-    apply_automatic_associations,
-    assess_frame_associations,
+    IdentityAssessment,
+    IdentityCandidate,
+    assess_frame_identity,
 )
 from session_context.models import SessionContext
 from session_context.persistence import load_session_context, save_session_context
@@ -46,7 +58,25 @@ REASONS = {
     "unique_candidate_with_evidence": "Candidat unic și trăsături concordante",
     "insufficient_evidence": "Dovezi insuficiente",
     "competing_current_appearances": "Aceeași identitate este revendicată de mai multe apariții",
+    "criteria_not_configured": (
+        "Nu sunt configurate criterii pentru această apariție"
+    ),
 }
+REASONS.update({
+    "all_candidates_rejected": "Asocierile candidate au fost respinse anterior",
+    "identity_evidence_required": "Identitatea necesită dovezi suplimentare",
+    "insufficient_characteristics": "Caracteristici obligatorii neobservate sau incerte",
+    "unmapped_types": "Unele denumiri nu au corespondență în ontologie",
+    "ambiguous_types": "Există mai multe interpretări ale tipurilor",
+    "uncertain_types": "Tipurile observate sunt incerte",
+    "incomplete_ontology": "Unele importuri ale ontologiei nu sunt încărcate",
+    "declared_disjoint_types": "Clasele propuse au o declarație de disjuncție",
+    "unknown_type_relation": "Relația dintre tipurile propuse nu este stabilită",
+    "criteria_scope_not_configured": "Domeniul criteriilor nu este configurat",
+    "criteria_scope_unresolved": "Aplicabilitatea criteriilor rămâne neclară",
+    "criteria_scope_not_supported": "Tipurile propuse nu susțin aplicabilitatea criteriilor",
+    "criteria_scope_proposed": "Tipurile propuse se încadrează în domeniul criteriilor",
+})
 STATUSES = {
     "unchanged": "Concordant",
     "different": "Diferit",
@@ -58,6 +88,33 @@ OUTCOMES = {
     "unresolved": "Nu pot decide",
 }
 
+def _review_assessment(
+    assessment: IdentityAssessment,
+) -> AssociationAssessment:
+    candidates = tuple(
+        IdentityCandidate(
+            comparison=pair.characteristics.comparison,
+            object_iri=group.object_iri,
+            automatic_eligible=False,
+            prior_unresolved=bool(group.unresolved_decisions),
+        )
+        for group in assessment.selection.candidates
+        for pair in group.assessments
+    )
+
+    reason = (
+        "characteristic_difference"
+        if assessment.action == "confirmation"
+        else next(iter(assessment.reasons), "insufficient_evidence")
+    )
+
+    return AssociationAssessment(
+        occurrence_iri=assessment.occurrence_iri,
+        action=assessment.action,
+        reason=reason,
+        candidates=candidates,
+    )
+
 
 class IdentityReviewWindow(tk.Toplevel):
     def __init__(
@@ -66,6 +123,8 @@ class IdentityReviewWindow(tk.Toplevel):
         *,
         context: SessionContext,
         image_paths: Mapping[str, Path],
+        mapper: SessionTypeMapper,
+        criteria_by_occurrence: Mapping[URIRef, IdentityCriteria],
         protected_paths: Collection[Path] = (),
         dirty: bool = False,
     ):
@@ -73,6 +132,13 @@ class IdentityReviewWindow(tk.Toplevel):
             raise ValueError("Sunt necesare cel puțin două cadre descrise.")
         super().__init__(parent)
         self.context = context
+        self.mapper = mapper
+        self.criteria_by_occurrence = {
+            URIRef(occurrence): criteria
+            for occurrence, criteria in criteria_by_occurrence.items()
+        }
+        self.identity_assessments: dict[URIRef, IdentityAssessment] = {}
+        self.evaluation_iri: URIRef | None = None
         self.source_sha256 = context.source_sha256
         self.session_id = context.session_id
         self.image_paths = {
@@ -97,9 +163,9 @@ class IdentityReviewWindow(tk.Toplevel):
         self.images_valid = False
         self.object_labels = {}
         self.actor = tk.StringVar(self)
-        self.minimum = tk.StringVar(self, value="2")
         self.status = tk.StringVar(
-            self, value="Alege cadrele și trăsăturile de identitate."
+            self,
+            value="Alege cadrele pentru comparare.",
         )
 
         self.title("Identitatea obiectelor")
@@ -109,7 +175,6 @@ class IdentityReviewWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self._refresh_objects()
-        self.minimum.trace_add("write", self._invalidate)
 
     def _build(self):
         toolbar = ttk.Frame(self, padding=10)
@@ -137,39 +202,13 @@ class IdentityReviewWindow(tk.Toplevel):
         self.current.current(1)
         for chooser in (self.reference, self.current):
             chooser.bind("<<ComboboxSelected>>", self._invalidate)
-        ttk.Label(settings, text="Minim trăsături concordante").grid(
-            row=0, column=2, sticky="w"
-        )
-        ttk.Spinbox(
-            settings, from_=1, to=100, textvariable=self.minimum, width=8
-        ).grid(row=1, column=2, sticky="w")
+
         ttk.Button(
             settings, text="Evaluează asocierile", command=self.evaluate
         ).grid(row=1, column=3, padx=(12, 0))
         settings.columnconfigure(0, weight=1)
         settings.columnconfigure(1, weight=1)
 
-        traits = ttk.LabelFrame(
-            self, text="Selectează trăsăturile folosite pentru identitate", padding=8
-        )
-        traits.pack(fill="x", padx=10, pady=8)
-        self.traits = tk.Listbox(
-            traits, selectmode="multiple", exportselection=False, height=4
-        )
-        self.traits.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(traits, command=self.traits.yview)
-        scroll.pack(side="right", fill="y")
-        self.traits.configure(yscrollcommand=scroll.set)
-        names = {
-            " ".join(normalize("NFC", str(value)).split()).casefold()
-            for node in self.context.observations.subjects(
-                RDF.type, CTX.CharacteristicObservation
-            )
-            for value in self.context.observations.objects(node, RDFS.label)
-        }
-        for name in sorted(names):
-            self.traits.insert("end", name)
-        self.traits.bind("<<ListboxSelect>>", self._invalidate)
         ttk.Label(
             self,
             text="Evaluarea folosește observațiile disponibile la deschidere. Diferențele textuale "
@@ -275,16 +314,19 @@ class IdentityReviewWindow(tk.Toplevel):
             fill="x", padx=12, pady=(0, 10)
         )
 
-    def _policy(self):
-        names = tuple(self.traits.get(index) for index in self.traits.curselection())
-        return (
-            self.frame_ids[self.reference.current()],
-            self.frame_ids[self.current.current()],
-            names,
-            int(self.minimum.get()),
-        )
+    def _comparison_settings(self):
+        reference = self.frame_ids[self.reference.current()]
+        current = self.frame_ids[self.current.current()]
+
+        return reference, current, {
+            occurrence: self.criteria_by_occurrence[occurrence]
+            for occurrence in entities_for_frame(self.context, current)
+            if occurrence in self.criteria_by_occurrence
+        }
 
     def _invalidate(self, *_args):
+        self.evaluation_iri = None
+        self.identity_assessments.clear()
         self.rows.clear()
         self.selected = None
         self.assessments.delete(*self.assessments.get_children())
@@ -298,7 +340,7 @@ class IdentityReviewWindow(tk.Toplevel):
             label.configure(image="", text="")
         for button in self.decision_buttons.values():
             button.configure(state="disabled")
-        self.status.set("Evaluează din nou după alegerea cadrelor sau a trăsăturilor.")
+        self.status.set("Evaluează din nou după alegerea cadrelor.")
 
     def _label(self, occurrence):
         value = self.context.observations.value(occurrence, RDFS.label, any=False)
@@ -310,43 +352,80 @@ class IdentityReviewWindow(tk.Toplevel):
 
     def evaluate(self):
         wanted = self.selected.occurrence_iri if self.selected else None
+
         try:
-            reference, current, names, minimum = self._policy()
-            decisions = apply_automatic_associations(
-                self.context, reference, current,
-                identity_names=names, min_matching=minimum,
+            reference, current, criteria = self._comparison_settings()
+            previous_size = len(self.context.dataset)
+
+            record, results = record_frame_identity_evaluation(
+                self.context,
+                reference,
+                current,
+                mapper=self.mapper,
+                criteria_by_occurrence=criteria,
             )
-            if decisions:
+
+            if len(self.context.dataset) != previous_size:
                 self.dirty = True
-            result = assess_frame_associations(
-                self.context, reference, current,
-                identity_names=names, min_matching=minimum,
-            )
+
             self._refresh_objects()
             self._invalidate()
+
+            self.evaluation_iri = record
+            self.identity_assessments = {
+                item.occurrence_iri: item
+                for item in results
+            }
+
             chosen = None
-            for index, assessment in enumerate(result, 1):
+
+            for index, result in enumerate(results, 1):
+                assessment = _review_assessment(result)
                 row = str(index)
                 self.rows[row] = assessment
-                target = object_for_occurrence(self.context, assessment.occurrence_iri)
-                self.assessments.insert("", "end", iid=row, values=(
-                    f"{self._label(assessment.occurrence_iri)} · {index}",
-                    ACTIONS[assessment.action],
-                    self.object_labels.get(target, "—"),
-                ))
+
+                target = result.selection.existing_object_iri
+
+                self.assessments.insert(
+                    "",
+                    "end",
+                    iid=row,
+                    values=(
+                        f"{self._label(assessment.occurrence_iri)} · {index}",
+                        ACTIONS[assessment.action],
+                        self.object_labels.get(target, "—"),
+                    ),
+                )
+
                 if chosen is None or assessment.occurrence_iri == wanted:
                     chosen = row
+
             if chosen is not None:
                 self.assessments.selection_set(chosen)
                 self._select()
+
+            changes = sum(
+                item.action == "confirmation"
+                for item in results
+            )
+            unresolved = sum(
+                item.action == "unresolved"
+                for item in results
+            )
+
             self.status.set(
-                f"{len(decisions)} asocieri automate noi. "
-                f"{sum(item.action == 'confirmation' for item in result)} schimbări "
-                "de verificat. Modificările contextului se salvează separat."
+                f"Evaluare înregistrată. {changes} diferențe de verificat; "
+                f"{unresolved} apariții nerezolvate. "
+                "Salvează contextul pentru a păstra rezultatele."
             )
             return True
+
         except Exception as exc:
-            messagebox.showerror("Evaluare nereușită", str(exc), parent=self)
+            messagebox.showerror(
+                "Evaluare nereușită",
+                str(exc),
+                parent=self,
+            )
             return False
 
     def _image_bytes(self, frame_id):
@@ -412,7 +491,7 @@ class IdentityReviewWindow(tk.Toplevel):
         candidates = self.selected.candidates
         self.candidate.configure(
             values=tuple(
-                f"Candidat {index}: {self._label(candidate.reference_iri)}"
+                f"Comparația {index}: {self._label(candidate.reference_iri)}"
                 for index, candidate in enumerate(candidates, 1)
             ),
             state="readonly" if candidates else "disabled",
@@ -425,111 +504,216 @@ class IdentityReviewWindow(tk.Toplevel):
 
     def _show_comparison(self, _event=None):
         self.comparison.delete(*self.comparison.get_children())
+
         for button in self.decision_buttons.values():
             button.configure(state="disabled")
+
         assessment = self.selected
+
         if assessment is None:
             return
-        self.caption.configure(text=REASONS.get(assessment.reason, "Nerezolvat"))
+
+        detailed = self.identity_assessments[assessment.occurrence_iri]
+        explanation = "\n".join(
+            REASONS.get(reason, "Informație suplimentară de evaluat")
+            for reason in detailed.reasons
+        )
+        self.caption.configure(text=explanation)
+
         index = self.candidate.current()
+
         if index < 0 or index >= len(assessment.candidates):
             return
+
         candidate = assessment.candidates[index]
-        location = self.context.observations.value(
-            candidate.reference_iri, CTX.location, any=False
-        )
-        current_location = self.context.observations.value(
-            assessment.occurrence_iri, CTX.location, any=False
-        )
+
         self.caption.configure(
-            text=f"{REASONS.get(assessment.reason, 'Nerezolvat')}\n"
-                 f"Referință: {self._label(candidate.reference_iri)} "
-                 f"({location or 'poziție nespecificată'}). "
-                 f"Cadru comparat: {self._label(assessment.occurrence_iri)} "
-                 f"({current_location or 'poziție nespecificată'})."
+            text=(
+                f"{explanation}\n"
+                f"Referință: {self._label(candidate.reference_iri)}. "
+                f"Cadru comparat: {self._label(assessment.occurrence_iri)}."
+            )
         )
+
+        def values(evidence):
+            return "; ".join(
+                item.value
+                + (" (incert)" if item.uncertain is not False else "")
+                for item in evidence
+            ) or "Neobservat"
+
         for item in candidate.comparison.characteristics:
-            def values(evidence):
-                return "; ".join(
-                    value.value + (" (incert)" if value.uncertain is not False else "")
-                    for value in evidence
-                ) or "Neobservat"
-            self.comparison.insert("", "end", values=(
-                item.name, values(item.left), values(item.right), STATUSES[item.status]
-            ))
+            self.comparison.insert(
+                "",
+                "end",
+                values=(
+                    item.name,
+                    values(item.left),
+                    values(item.right),
+                    STATUSES[item.status],
+                ),
+            )
+
         if self._reviewable(assessment):
             for outcome, button in self.decision_buttons.items():
                 button.configure(
-                    state="normal"
-                    if outcome == "unresolved" or self.images_valid else "disabled"
+                    state=(
+                        "normal"
+                        if outcome == "unresolved" or self.images_valid
+                        else "disabled"
+                    )
                 )
 
-    @staticmethod
-    def _reviewable(assessment):
+    def _reviewable(self, assessment):
+        detailed = self.identity_assessments.get(
+            assessment.occurrence_iri
+        )
+
+        if (
+                detailed is None
+                or len(detailed.selection.candidates) != 1
+        ):
+            return False
+
+        index = self.candidate.current()
+
+        if index < 0 or index >= len(assessment.candidates):
+            return False
+
+        candidate = assessment.candidates[index]
+        group = detailed.selection.candidates[0]
+
         return (
-            len(assessment.candidates) == 1
-            and assessment.candidates[0].comparison.requires_confirmation
-            and (
-                assessment.action == "confirmation"
-                or assessment.reason == "previous_unresolved_decision"
-            )
+                candidate.comparison.requires_confirmation
+                and (
+                        detailed.action == "confirmation"
+                        or bool(group.unresolved_decisions)
+                )
         )
 
     def decide(self, outcome: IdentityOutcome):
         shown = self.selected
+
         if shown is None or not self._reviewable(shown):
             return False
+
         try:
-            reference, current, names, minimum = self._policy()
+            if (
+                    self.evaluation_iri is None
+                    or not identity_evaluation_is_current(
+                self.context,
+                self.evaluation_iri,
+            )
+            ):
+                raise ValueError(
+                    "Contextul s-a schimbat. Evaluează din nou."
+                )
+
+            reference, current, criteria = self._comparison_settings()
+
             fresh = next(
-                item for item in assess_frame_associations(
-                    self.context, reference, current,
-                    identity_names=names, min_matching=minimum,
+                item
+                for item in assess_frame_identity(
+                    self.context,
+                    reference,
+                    current,
+                    mapper=self.mapper,
+                    criteria_by_occurrence=criteria,
                 )
                 if item.occurrence_iri == shown.occurrence_iri
             )
-            if (
-                not self._reviewable(fresh)
-                or fresh.candidates[0].reference_iri != shown.candidates[0].reference_iri
-            ):
-                raise ValueError("Asocierea s-a schimbat. Evaluează din nou.")
+
+            if fresh != self.identity_assessments[shown.occurrence_iri]:
+                raise ValueError(
+                    "Evaluarea s-a schimbat. Evaluează din nou."
+                )
+
+            candidate = shown.candidates[self.candidate.current()]
+
             if outcome != "unresolved":
                 self._image_bytes(reference)
                 self._image_bytes(current)
+
             actor = self.actor.get().strip()
-            justification = self.justification.get("1.0", "end").strip()
-            if not actor or not justification:
-                raise ValueError("Completează autorul și justificarea deciziei.")
-            candidate = fresh.candidates[0]
+            text = self.justification.get("1.0", "end").strip()
+
+            if not actor or not text:
+                raise ValueError(
+                    "Completează autorul și justificarea deciziei."
+                )
+
             tracked = None
             object_id = None
+
             if outcome == "same_object":
                 if candidate.object_iri is None:
-                    tracked = TrackedObject(session_id=self.context.session_id)
+                    tracked = TrackedObject(
+                        session_id=self.context.session_id
+                    )
                     object_id = tracked.object_id
+
                 else:
                     identifier = self.context.identities.value(
-                        candidate.object_iri, CTX.objectId, any=False
+                        candidate.object_iri,
+                        CTX.objectId,
+                        any=False,
                     )
+
                     if not isinstance(identifier, Literal):
-                        raise ValueError("Identificator de obiect invalid.")
+                        raise ValueError(
+                            "Identificator de obiect invalid."
+                        )
+
                     object_id = str(identifier)
+
+            justification = json.dumps(
+                {
+                    "method": "identity-review-v2",
+                    "text": text,
+                    "evaluation_iri": str(self.evaluation_iri),
+                    "candidate_key": str(candidate.identity_key),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
             decision = IdentityDecision(
                 session_id=self.context.session_id,
                 left_occurrence_iri=str(candidate.reference_iri),
-                right_occurrence_iri=str(fresh.occurrence_iri),
+                right_occurrence_iri=str(shown.occurrence_iri),
                 outcome=outcome,
                 object_id=object_id,
                 decided_by=actor,
                 justification=justification,
             )
-            record_identity_decision(self.context, decision, new_object=tracked)
+
+            record_identity_decision(
+                self.context,
+                decision,
+                new_object=tracked,
+            )
+
             self.dirty = True
-            self.evaluate()
-            self.status.set(f"Decizie înregistrată: {OUTCOMES[outcome]}. Salvează contextul.")
+
+            if self.evaluate():
+                self.status.set(
+                    f"Decizie înregistrată: {OUTCOMES[outcome]}. "
+                    "Salvează contextul."
+                )
+            else:
+                self.status.set(
+                    "Decizia este înregistrată. "
+                    "Reevaluarea trebuie reluată."
+                )
+
             return True
+
         except Exception as exc:
-            messagebox.showerror("Decizie neînregistrată", str(exc), parent=self)
+            messagebox.showerror(
+                "Decizie neînregistrată",
+                str(exc),
+                parent=self,
+            )
             return False
 
     def _refresh_objects(self):
@@ -574,6 +758,19 @@ class IdentityReviewWindow(tk.Toplevel):
             left_frame = self._frame_title(memberships[left])
             right_frame = self._frame_title(memberships[right])
             justification = str(graph.value(node, CTX.justification))
+
+            try:
+                details = json.loads(justification)
+            except json.JSONDecodeError:
+                details = None
+
+            if (
+                isinstance(details, dict)
+                and details.get("method") == "identity-review-v2"
+                and isinstance(details.get("text"), str)
+            ):
+                justification = details["text"]
+
             if actor == "automatic:frame-matching-v1":
                 justification = "Asociere automată pe baza trăsăturilor concordante."
             self.history.insert(
@@ -676,6 +873,23 @@ def main():
 
     parser = argparse.ArgumentParser(description="Revizia identităților dintr-o sesiune.")
     parser.add_argument("session", type=Path, help="Exportul JSON-LD al sesiunii")
+    parser.add_argument(
+        "--ontology",
+        type=Path,
+        required=True,
+        help="Fișierul ontologiei",
+    )
+    parser.add_argument(
+        "--ontology-format",
+        required=True,
+        help="Formatul RDF al ontologiei, de exemplu turtle sau xml",
+    )
+    parser.add_argument(
+        "--criteria",
+        type=Path,
+        required=True,
+        help="Fișier JSON cu criteriile pentru aparițiile sesiunii",
+    )
     args = parser.parse_args()
     root = tk.Tk()
     root.withdraw()
@@ -683,6 +897,26 @@ def main():
         source = args.session.expanduser().resolve()
         document = json.loads(source.read_text(encoding="utf-8-sig"))
         context = build_session_context(document)
+
+        ontology_source = read_ontology_source(
+            args.ontology,
+            rdf_format=args.ontology_format,
+        )
+        mapper = SessionTypeMapper(ontology_source)
+
+        criteria_source = args.criteria.expanduser().resolve()
+
+        configured = TypeAdapter(
+            dict[AbsoluteIRI, IdentityCriteria]
+        ).validate_json(
+            criteria_source.read_text(encoding="utf-8-sig")
+        )
+
+        criteria_by_occurrence = {
+            URIRef(occurrence): criteria
+            for occurrence, criteria in configured.items()
+        }
+
         paths = {}
         for frame in document.get("imported_frames", []):
             if frame["frame_id"] in context.frame_iris:
@@ -712,8 +946,18 @@ def main():
         if document.get("ontology_path"):
             path = Path(document["ontology_path"]).expanduser()
             protected.append(path if path.is_absolute() else source.parent / path)
+        protected.extend([
+            ontology_source.path,
+            criteria_source,
+        ])
+
         window = IdentityReviewWindow(
-            root, context=context, image_paths=paths, protected_paths=protected
+            root,
+            context=context,
+            image_paths=paths,
+            mapper=mapper,
+            criteria_by_occurrence=criteria_by_occurrence,
+            protected_paths=protected,
         )
         window.transient("")
         window.deiconify()
