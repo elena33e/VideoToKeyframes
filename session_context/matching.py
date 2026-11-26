@@ -128,16 +128,13 @@ def assess_frame_candidates(
     criteria_by_occurrence: Mapping[URIRef, IdentityCriteria],
     language: str | None = None,
 ) -> dict[URIRef, tuple[IdentityCandidateAssessment, ...]]:
-    """Compară aparițiile din două cadre, fără decizii de identitate.
+    """Compară aparițiile curente care au criterii configurate.
 
-    Fiecare apariție din cadrul comparat trebuie să aibă criterii
-    selectate explicit pentru ea.
+    Fiecare apariție configurată este comparată cu toate aparițiile
+    de referință. Diferențele și informațiile necunoscute sunt păstrate.
 
-    Compară fiecare apariție curentă cu toate aparițiile de referință.
-    Numele diferite, diferențele de caracteristici și informațiile
-    necunoscute nu elimină rezultate.
-
-    Perechile returnate sunt dovezi de evaluat, nu asocieri acceptate.
+    Aparițiile curente fără criterii sunt tratate separat
+    în evaluarea identității.
     """
     if (
         reference_frame_id == current_frame_id
@@ -159,10 +156,10 @@ def assess_frame_candidates(
 
     selected_criteria = dict(criteria_by_occurrence)
 
-    if set(selected_criteria) != set(current):
+    if not set(selected_criteria).issubset(set(current)):
         raise ValueError(
-            "Specifică criterii pentru exact aparițiile "
-            "din cadrul comparat."
+            "Criteriile indică apariții care nu aparțin "
+            "cadrului comparat."
         )
 
     if any(
@@ -186,6 +183,7 @@ def assess_frame_candidates(
             for reference in references
         )
         for occurrence in current
+        if occurrence in selected_criteria
     }
 
 @dataclass(frozen=True)
@@ -285,7 +283,8 @@ def select_frame_candidates(
 
     selections = {}
 
-    for occurrence, assessments in comparisons.items():
+    for occurrence in entities_for_frame(context, current_frame_id):
+        assessments = comparisons.get(occurrence, ())
         existing_object = object_for_occurrence(
             context, occurrence
         )
@@ -383,7 +382,7 @@ class IdentityAssessment:
     selection: IdentityCandidateSelection
     action: AssociationAction
     reasons: tuple[str, ...]
-    evaluator_version: str = "identity-assessment-v2"
+    evaluator_version: str = "identity-assessment-v3"
 
     @property
     def occurrence_iri(self) -> URIRef:
@@ -560,10 +559,24 @@ def assess_frame_identity(
         language=language,
     )
 
-    return tuple(
-        _assess_candidate_selection(selection)
-        for selection in selections.values()
-    )
+    results = []
+
+    for selection in selections.values():
+        if (
+                selection.existing_object_iri is None
+                and selection.occurrence_iri not in criteria_by_occurrence
+        ):
+            assessment = IdentityAssessment(
+                selection=selection,
+                action="unresolved",
+                reasons=("criteria_not_configured",),
+            )
+        else:
+            assessment = _assess_candidate_selection(selection)
+
+        results.append(assessment)
+
+    return tuple(results)
 
 def _label(context: SessionContext, occurrence: URIRef) -> str:
     values = set(context.observations.objects(occurrence, RDFS.label))
