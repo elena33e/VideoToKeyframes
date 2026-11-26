@@ -148,6 +148,7 @@ def build_session_context(session: dict[str, Any]) -> SessionContext:
         source_sha256=sha256(content.encode("utf-8")).hexdigest(),
         dataset=dataset,
         observations_iri=observations_iri,
+        identities_iri=URIRef(base_iri + "context/identities"),
         frame_iris=frame_iris,
     )
 

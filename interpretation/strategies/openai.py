@@ -3,6 +3,8 @@
 from ..contracts import VLMRequest, VLMResponse
 from .base import VLMStrategy
 from ._chat_completions import execute_chat_request, validate_connection
+from typing import Any
+from pathlib import Path
 
 
 class OpenAIStrategy(VLMStrategy):
@@ -15,6 +17,7 @@ class OpenAIStrategy(VLMStrategy):
         model: str,
         timeout_seconds: float = 180.0,
         reasoning_effort: str | None = None,
+        journal_directory: Path | None = None,
     ):
         validate_connection(api_key, model, timeout_seconds)
 
@@ -34,6 +37,7 @@ class OpenAIStrategy(VLMStrategy):
         self._model = model.strip()
         self._timeout_seconds = timeout_seconds
         self._reasoning_effort = reasoning_effort
+        self._journal_directory = journal_directory
 
     @property
     def provider(self) -> str:
@@ -44,7 +48,15 @@ class OpenAIStrategy(VLMStrategy):
         return self._model
 
     def generate(self, request: VLMRequest) -> VLMResponse:
-        parameters = {"store": False}
+        parameters: dict[str, Any] = {"store": False}
+
+        cache_stable_prefix = self.model == "gpt-6.1-sol"
+
+        if cache_stable_prefix:
+            parameters["prompt_cache_options"] = {
+                "mode": "explicit",
+                "ttl": "30m",
+            }
 
         if self._reasoning_effort is not None:
             parameters["reasoning_effort"] = self._reasoning_effort
@@ -58,4 +70,6 @@ class OpenAIStrategy(VLMStrategy):
             parameters=parameters,
             timeout_seconds=self._timeout_seconds,
             token_limit_parameter="max_completion_tokens",
+            cache_stable_prefix=cache_stable_prefix,
+            journal_directory=self._journal_directory,
         )

@@ -70,6 +70,9 @@ class VLMRequest:
     # Buget pentru răspunsul întregului grup.
     max_output_tokens: int
 
+    # Date de referință care se pot schimba între grupuri.
+    group_context: str = ""
+
     def __post_init__(self):
         if not self.system_prompt.strip():
             raise ValueError("Promptul de sistem este gol.")
