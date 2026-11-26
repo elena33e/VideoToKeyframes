@@ -11,8 +11,13 @@ class SessionContext:
     source_sha256: str
     dataset: Dataset
     observations_iri: URIRef
+    identities_iri: URIRef
     frame_iris: dict[str, URIRef]
 
     @property
     def observations(self) -> Graph:
         return self.dataset.graph(self.observations_iri)
+
+    @property
+    def identities(self) -> Graph:
+        return self.dataset.graph(self.identities_iri)
