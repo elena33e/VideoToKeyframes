@@ -4,6 +4,7 @@ import json
 from hashlib import sha256
 from typing import Any
 from urllib.parse import quote
+from dataclasses import replace
 
 from rdflib import Dataset, Namespace, URIRef
 
@@ -19,9 +20,27 @@ from .models import SessionContext
 
 OBS = Namespace(OBSERVATION_NAMESPACE)
 
+def snapshot_session_context(context: SessionContext) -> SessionContext:
+    """Copiază contextul pentru o cerere care rulează separat."""
+    dataset = Dataset()
 
-def build_session_context(session: dict[str, Any]) -> SessionContext:
-    """Încarcă observațiile finalizate, indiferent de selecția pentru populare."""
+    for prefix, namespace in context.dataset.namespaces():
+        dataset.bind(prefix, namespace)
+
+    for quad in context.dataset.quads((None, None, None, None)):
+        dataset.add(quad)
+
+    return replace(
+        context,
+        dataset=dataset,
+        frame_iris=dict(context.frame_iris),
+    )
+
+def _context_source(
+    session: dict[str, Any],
+) -> tuple[str, dict[str, URIRef], str]:
+    """Validează și serializează observațiile finalizate."""
+
     session_id = session["session_id"]
     if not isinstance(session_id, str) or not session_id.strip():
         raise ValueError("Lipsește identificatorul sesiunii.")
@@ -136,6 +155,18 @@ def build_session_context(session: dict[str, Any]) -> SessionContext:
         allow_nan=False,
     )
 
+    return base_iri, frame_iris, content
+
+def context_source_sha256(session: dict[str, Any]) -> str:
+    """Calculează amprenta fără construirea dataset-ului RDF."""
+    _, _, content = _context_source(session)
+    return sha256(content.encode("utf-8")).hexdigest()
+
+
+def build_session_context(session: dict[str, Any]) -> SessionContext:
+    """Construiește contextul din observațiile finalizate."""
+    base_iri, frame_iris, content = _context_source(session)
+
     dataset = Dataset()
     observations_iri = URIRef(base_iri + "context/observations")
     dataset.graph(observations_iri).parse(
@@ -144,7 +175,7 @@ def build_session_context(session: dict[str, Any]) -> SessionContext:
     )
 
     return SessionContext(
-        session_id=session_id,
+        session_id=session["session_id"],
         source_sha256=sha256(content.encode("utf-8")).hexdigest(),
         dataset=dataset,
         observations_iri=observations_iri,

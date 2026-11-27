@@ -32,4 +32,4 @@ jobs:
         run: python -m pip check
 
       - name: Run tests
-        run: python -B -m unittest discover -s tests -v
+        run: python -B -m unittest discover -s tests -t . -v

@@ -346,7 +346,41 @@ VideoToKeyframes/
 │   ├── models.py
 │   ├── catalog.py
 │   ├── context.py
-│   └── namespaces.py
+│   ├── namespaces.py
+│   ├── alignment.py
+│   └── type_relations.py
+├── ontology_population/
+│   ├── config.py
+│   ├── prompting.py
+│   ├── service.py
+│   ├── session.py
+│   ├── review.py
+│   ├── revision.py
+│   ├── validation.py
+│   ├── storage.py
+│   └── strategies/
+│       ├── base.py
+│       ├── claude.py
+│       └── openai.py
+├── session_context/
+│   ├── models.py
+│   ├── graph.py
+│   ├── persistence.py
+│   ├── type_alignment.py
+│   ├── characteristics/
+│   │   ├── comparison.py
+│   │   ├── selection.py
+│   │   └── graph.py
+│   └── identity/
+│       ├── models.py
+│       ├── graph.py
+│       ├── criteria.py
+│       ├── candidates.py
+│       ├── selection.py
+│       ├── assessment.py
+│       ├── associations.py
+│       ├── evaluation.py
+│       └── _matching.py
 ├── workflow/
 │   ├── models.py
 │   ├── service.py
@@ -359,17 +393,29 @@ VideoToKeyframes/
 │   ├── workflow_app.py
 │   ├── keyframe_gallery.py
 │   ├── formatting.py
-│   └── app.py
+│   ├── identity_review.py
+│   ├── app.py
+│   └── ontology/
+│       ├── window.py
+│       └── review.py
+├── diagnostics/
+│   └── http_journal.py
 ├── tests/
-│   ├── test_description_batches.py
-│   ├── test_interpretation_service.py
-│   ├── test_vlm_strategies.py
-│   └── test_workflow_gui.py
+│   ├── gui/
+│   ├── interpretation/
+│   │   └── strategies/
+│   ├── ontology/
+│   ├── ontology_population/
+│   ├── session_context/
+│   │   ├── characteristics/
+│   │   └── identity/
+│   └── workflow/
 ├── wheels/
 │   └── scenedetect_core-0.7.2-py3-none-any.whl
 ├── run_workflow_gui.py
 ├── run_diagnostics.py
 ├── run_ontology_context_test.py
+├── run_ontology_population_test.py
 ├── requirements.txt
 ├── README.md
 └── .gitignore
@@ -382,18 +428,38 @@ Fișierele `__init__.py` sunt omise din schemă.
 | `extraction` | Construirea pipeline-ului, scenele, keyframe-urile și diagnosticul |
 | `interpretation` | Prompturile, contractele, strategiile VLM și validarea observațiilor |
 | `ontology` | Citirea RDF, catalogul, namespace-urile și contextul pentru interpretare |
+| `ontology_population` | Generarea propunerilor de populare, revizuirea și salvarea lor |
+| `ontology_population.strategies` | Contractul de generare și clienții furnizorilor |
+| `session_context` | Graful observațiilor unei sesiuni, persistența și maparea tipurilor |
+| `session_context.characteristics` | Compararea caracteristicilor și înregistrarea propunerilor de selecție |
+| `session_context.identity` | Modelele, criteriile, candidații, evaluările și deciziile de identitate |
 | `workflow` | Sesiunea, selecția, procesarea pe grupuri și salvarea JSON-LD |
 | `gui` | Interfețele, galeria, previzualizările și formatarea pentru afișare |
+| `gui.ontology` | Interfața de populare și revizuire a ontologiei |
+| `diagnostics` | Jurnalizarea cererilor HTTP |
 | `tests` | Verificările automate ale comportamentelor implementate |
 
 Strategiile implementează un contract comun, iar funcțiile din modulele `factory.py` construiesc strategiile și pipeline-ul. Componentele detectorului și extractorului sunt injectate prin constructorul pipeline-ului.
+
+În `session_context.identity`, `candidates.py` compară dovezile pentru perechi de apariții, `selection.py` grupează candidații și respectă deciziile existente, iar `assessment.py` evaluează identitatea fără a modifica graful. `associations.py` păstrează fluxul de asociere automată, iar `evaluation.py` înregistrează evaluările. Utilitarele comune acestor module sunt interne, în `_matching.py`.
+
+Testele urmează structura pachetului testat: de exemplu, testele criteriilor de identitate sunt în `tests/session_context/identity/`, iar cele ale strategiilor VLM în `tests/interpretation/strategies/`. Subdirectoarele se adaugă când există teste pentru ele. Importurile între teste folosesc numele complet, începând cu `tests.`, astfel încât să nu depindă de directorul curent al unui fișier.
 
 ## Testare
 
 Rulează din rădăcina proiectului:
 
 ```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -t . -v
+```
+
+Opțiunea `-t .` stabilește rădăcina proiectului pentru importuri și evită confundarea subpachetelor de teste cu pachetele aplicației. Aceeași comandă este folosită în verificarea automată a proiectului.
+
+Pentru un singur domeniu sau fișier de teste:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests/session_context/identity -t . -v
+.\.venv\Scripts\python.exe -B -m unittest tests.ontology.test_type_relations -v
 ```
 
 Suita verifică strategiile și parametrii cererilor, validarea răspunsurilor, selecția, fluxurile interfeței, contextul ontologic și reutilizarea grafului. Testele procesării pe grupuri verifică anularea, păstrarea observațiilor la regenerare eșuată, evitarea apelurilor inutile și respingerea unui grup cu rezultate invalide.

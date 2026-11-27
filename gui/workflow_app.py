@@ -40,8 +40,22 @@ from interpretation.config import (
     DEFAULT_DOMAIN_CONTEXT,
 )
 from interpretation.contracts import MAX_GROUP_SIZE
-from gui.ontology_window import OntologyWindow
+from gui.ontology.window import OntologyWindow
 from workflow.jsonld import session_to_jsonld
+
+from rdflib import URIRef
+
+from gui.identity_review import IdentityReviewWindow
+from session_context.graph import (
+    build_session_context,
+    context_source_sha256,
+)
+from session_context.identity.criteria import IdentityCriteria
+from session_context.models import SessionContext
+from session_context.persistence import save_session_context
+from session_context.type_alignment import SessionTypeMapper
+from ontology.reader import OntologySource
+from ontology_population.context import record_population_report
 
 STATUS_LABELS = {
     "pending": "Nedescris",
@@ -74,6 +88,11 @@ class WorkflowGUI:
 
         self.session = None
         self.ontology_window: OntologyWindow | None = None
+        self.identity_window: IdentityReviewWindow | None = None
+        self.session_context: SessionContext | None = None
+        self.session_context_dirty = False
+        self.identity_criteria: dict[URIRef, IdentityCriteria] = {}
+        self._identity_protected_paths: set[Path] = set()
         self.ontology_path = None
         self.ontology_context = None
         self.selection_preview_photo = None
@@ -567,6 +586,12 @@ class WorkflowGUI:
             actions, text="Populare și revizie…", command=self._open_ontology
         )
         self.ontology_button.pack(side="right", padx=(0, 8))
+        self.identity_button = ttk.Button(
+            actions,
+            text="Identitatea obiectelor…",
+            command=self._open_identity,
+        )
+        self.identity_button.pack(side="right", padx=(0, 8))
         body.pack(fill="both", expand=True)
 
     def _show_source_mode(self):
@@ -782,6 +807,9 @@ class WorkflowGUI:
         self.results_save_button.configure(state=save_state)
         self.ontology_button.configure(
             state="normal" if self._can_open_ontology() else "disabled"
+        )
+        self.identity_button.configure(
+            state="normal" if self._can_open_identity() else "disabled"
         )
         self.generate_context_button.configure(
             state="normal" if not self.busy and self.ontology_path
@@ -1720,6 +1748,251 @@ class WorkflowGUI:
             )
             self._sync_controls()
 
+    def _can_open_identity(self) -> bool:
+        return (
+            not self.busy
+            and self.session is not None
+            and self.ontology_source is not None
+            and sum(
+                frame.description_status == "completed"
+                and frame.observation is not None
+                for frame in self.session.frames
+            ) >= 2
+        )
+
+    def _save_identity_context(self) -> bool:
+        context = self.session_context
+
+        if context is None:
+            return False
+
+        filename = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Salvează contextul sesiunii",
+            initialfile=(
+                f"context_{context.session_id}_"
+                f"{context.source_sha256[:8]}.trig"
+            ),
+            defaultextension=".trig",
+            filetypes=[("Context de sesiune", "*.trig")],
+        )
+
+        if not filename:
+            return False
+
+        try:
+            destination = Path(filename).expanduser().resolve()
+
+            if destination in self._identity_protected_paths:
+                raise ValueError(
+                    "Contextul nu poate înlocui un fișier sursă."
+                )
+
+            save_session_context(context, destination)
+            self.session_context_dirty = False
+            self.status_var.set(
+                f"Context salvat: {destination.name}"
+            )
+            return True
+
+        except Exception as exc:
+            messagebox.showerror(
+                "Salvare nereușită",
+                str(exc),
+                parent=self.root,
+            )
+            return False
+
+    def _confirm_identity_context(self, message: str) -> bool:
+        if (
+            self.session_context is None
+            or not self.session_context_dirty
+        ):
+            return True
+
+        answer = messagebox.askyesnocancel(
+            "Context nesalvat",
+            message,
+            parent=self.root,
+        )
+
+        if answer is None:
+            return False
+
+        if answer:
+            return self._save_identity_context()
+
+        return True
+
+    def _get_identity_context(self) -> SessionContext | None:
+        if self.session is None:
+            return None
+
+        document = session_to_jsonld(self.session)
+        fingerprint = context_source_sha256(document)
+        existing = self.session_context
+
+        if (
+            existing is not None
+            and existing.session_id == self.session.session_id
+            and existing.source_sha256 == fingerprint
+        ):
+            return existing
+
+        prepared = build_session_context(document)
+
+        if not self._confirm_identity_context(
+            "Sesiunea sau observațiile s-au schimbat. "
+            "Salvezi contextul anterior înainte de înlocuire?"
+        ):
+            return None
+
+        self.session_context = prepared
+        self.session_context_dirty = False
+        return prepared
+
+    def _open_identity(self) -> None:
+        existing = self.identity_window
+
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_set()
+            return
+
+        if not self._can_open_identity():
+            return
+
+        window = None
+
+        try:
+            context = self._get_identity_context()
+
+            if context is None:
+                return
+
+            paths = {
+                frame_id: get_frame_path(
+                    self.session,
+                    frame_id,
+                    must_exist=False,
+                )
+                for frame_id in context.frame_iris
+            }
+
+            protected = {
+                get_frame_path(
+                    self.session,
+                    frame.frame_id,
+                    must_exist=False,
+                )
+                for frame in self.session.keyframes
+            }
+            protected.add(self.ontology_source.path.resolve())
+
+            if self.session.extraction is not None:
+                protected.update({
+                    self.session.extraction.input_video.resolve(),
+                    self.session.extraction.manifest.resolve(),
+                })
+
+            self._identity_protected_paths = protected
+
+            window = IdentityReviewWindow(
+                self.root,
+                context=context,
+                image_paths=paths,
+                mapper=SessionTypeMapper(self.ontology_source),
+                criteria_by_occurrence=self.identity_criteria,
+                protected_paths=protected,
+                dirty=self.session_context_dirty,
+            )
+            self.identity_window = window
+
+            window.wait_visibility()
+            window.grab_set()
+            self.root.wait_window(window)
+
+        except Exception as exc:
+            messagebox.showerror(
+                "Revizie indisponibilă",
+                str(exc),
+                parent=self.root,
+            )
+
+        finally:
+            if window is not None:
+                self.session_context = window.context
+                self.session_context_dirty = window.dirty
+                self.identity_criteria = dict(
+                    window.criteria_by_occurrence
+                )
+
+                if window.winfo_exists():
+                    window.destroy()
+
+            self.identity_window = None
+            self._sync_controls()
+
+    def _current_population_context(self) -> SessionContext:
+        """Returnează contextul activ, fără să îl reconstruiască."""
+        if self.session is None:
+            raise ValueError("Nu există o sesiune activă.")
+
+        identity = self.identity_window
+        context = (
+            identity.context
+            if identity is not None and identity.winfo_exists()
+            else self.session_context
+        )
+
+        if context is None:
+            raise ValueError("Contextul sesiunii nu este disponibil.")
+
+        fingerprint = context_source_sha256(
+            session_to_jsonld(self.session)
+        )
+        if (
+            context.session_id != self.session.session_id
+            or context.source_sha256 != fingerprint
+        ):
+            raise ValueError(
+                "Observațiile s-au schimbat. Redeschide popularea "
+                "pentru sesiunea curentă."
+            )
+
+        return context
+
+    def _receive_population_report(
+        self,
+        report: dict,
+        ontology_source: OntologySource,
+    ) -> SessionContext:
+        """Integrează propunerile în contextul folosit acum de GUI."""
+        context = self._current_population_context()
+        previous_size = len(context.dataset)
+
+        record_population_report(
+            context,
+            report,
+            ontology_source=ontology_source,
+        )
+
+        self.session_context = context
+
+        if len(context.dataset) != previous_size:
+            self.session_context_dirty = True
+
+            identity = self.identity_window
+            if (
+                identity is not None
+                and identity.winfo_exists()
+                and identity.context is context
+            ):
+                identity.dirty = True
+
+        return context
+
+
     def _can_open_ontology(self) -> bool:
         return (
             not self.busy
@@ -1743,12 +2016,32 @@ class WorkflowGUI:
 
         session = session_to_jsonld(self._with_settings(self.session))
 
+        try:
+            context = self._get_identity_context()
+        except Exception as exc:
+            messagebox.showerror(
+                "Context indisponibil",
+                str(exc),
+                parent=self.root,
+            )
+            return
+
+        if context is None:
+            return
+
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Populare și revizie ontologică")
         dialog.geometry("1000x650")
         dialog.minsize(700, 420)
 
-        window = OntologyWindow(dialog, session_data=session)
+        window = OntologyWindow(
+            dialog,
+            session_data=session,
+            session_context=context,
+            get_session_context=self._current_population_context,
+            on_population_report=self._receive_population_report,
+        )
         window.pack(fill="both", expand=True)
         dialog.protocol("WM_DELETE_WINDOW", window.close)
         self.ontology_window = window
@@ -1795,6 +2088,13 @@ class WorkflowGUI:
         )
 
     def _close(self):
+        window = self.identity_window
+
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_set()
+            return
+
         if self.busy:
             messagebox.showinfo(
                 "Procesare în desfășurare",
@@ -1804,11 +2104,32 @@ class WorkflowGUI:
             )
             return
 
+        population = self.ontology_window
+        if (
+            population is not None
+            and population.winfo_exists()
+            and population.generating
+        ):
+            population.winfo_toplevel().lift()
+            messagebox.showinfo(
+                "Populare în desfășurare",
+                "Așteaptă finalizarea populării sau închide "
+                "fereastra de populare înainte de închiderea aplicației.",
+                parent=self.root,
+            )
+            return
+
+        if not self._confirm_identity_context(
+                "Salvezi contextul sesiunii înainte de "
+                "închiderea aplicației?"
+        ):
+            return
+
         if self.dirty and not messagebox.askyesno(
-            "Închidere",
-            "Sesiunea are modificări nesalvate. "
-            "Închizi fără salvare?",
-            parent=self.root,
+                "Închidere",
+                "Sesiunea are modificări nesalvate. "
+                "Închizi fără salvare?",
+                parent=self.root,
         ):
             return
 

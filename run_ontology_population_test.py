@@ -9,14 +9,14 @@ from dotenv import load_dotenv
 from rdflib.util import guess_format
 
 from ontology.reader import read_ontology_source
-from ontology_population.claude import ClaudeClient
+from ontology_population.strategies.claude import ClaudeClient
 from ontology_population.config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_OPENAI_MODEL,
     MAX_BATCH_SIZE,
 )
-from ontology_population.generation import GenerationError
-from ontology_population.openai import OpenAIClient
+from ontology_population.strategies.base import GenerationError
+from ontology_population.strategies.openai import OpenAIClient
 from ontology_population.session import iter_population_reports
 
 

@@ -17,30 +17,36 @@ from unicodedata import normalize
 from pydantic import TypeAdapter
 
 from ontology.reader import read_ontology_source
-from session_context.evaluation_graph import (
+from session_context.identity.evaluation import (
     identity_evaluation_is_current,
     record_frame_identity_evaluation,
 )
-from session_context.identity import AbsoluteIRI
-from session_context.identity_criteria import IdentityCriteria
+from session_context.identity.models import AbsoluteIRI
+from session_context.identity.criteria import IdentityCriteria
 from session_context.type_alignment import SessionTypeMapper
 
 from interpretation.config import OBSERVATION_NAMESPACE
 from session_context.graph import build_session_context, entities_for_frame
-from session_context.identity import IdentityDecision, IdentityOutcome, TrackedObject
-from session_context.identity_graph import (
+from session_context.identity.models import (
+    IdentityDecision,
+    IdentityOutcome,
+    TrackedObject,
+)
+from session_context.identity.graph import (
     object_for_occurrence,
     record_identity_decision,
 )
-from session_context.matching import (
+from session_context.identity.associations import (
     AssociationAssessment,
-    IdentityAssessment,
     IdentityCandidate,
+)
+from session_context.identity.assessment import (
+    IdentityAssessment,
     assess_frame_identity,
 )
 from session_context.models import SessionContext
 from session_context.persistence import load_session_context, save_session_context
-
+from gui.characteristic_review import CharacteristicProposalView
 
 CTX = Namespace(OBSERVATION_NAMESPACE)
 ACTIONS = {
@@ -223,6 +229,29 @@ class IdentityReviewWindow(tk.Toplevel):
         tabs.add(review, text="Comparație")
         tabs.add(objects, text="Obiecte și apariții")
         tabs.add(history, text="Decizii")
+
+        proposals = ttk.Frame(tabs, padding=8)
+        tabs.add(proposals, text="Interpretări propuse")
+
+        self.characteristic_proposals = CharacteristicProposalView(
+            proposals,
+            get_context=lambda: self.context,
+            ontology=self.mapper.ontology_graph,
+            frame_labels=dict(zip(
+                self.frame_ids,
+                self.frame_labels,
+                strict=True,
+            )),
+        )
+        self.characteristic_proposals.pack(
+            fill="both", expand=True
+        )
+
+        def refresh_proposals(_event=None):
+            if tabs.select() == str(proposals):
+                self.characteristic_proposals.refresh()
+
+        tabs.bind("<<NotebookTabChanged>>", refresh_proposals)
 
         review.columnconfigure(0, weight=1, minsize=290)
         review.columnconfigure(1, weight=3)
@@ -846,6 +875,7 @@ class IdentityReviewWindow(tk.Toplevel):
             self.dirty = False
             self._invalidate()
             self._refresh_objects()
+            self.characteristic_proposals.refresh()
             self.status.set("Context reîncărcat. Alege cadrele și evaluează asocierile.")
             return True
         except Exception as exc:

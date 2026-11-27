@@ -16,6 +16,8 @@ import unicodedata
 
 from ontology.catalog import build_ontology_catalog
 from ontology.models import ConceptKind, OntologyConcept
+from session_context.characteristics.selection import CharacteristicSelectionProposal
+
 REVIEW_REPORT_VERSION = 1
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class ReviewFrame:
     population_provenance: dict[str, Any]
     vocabulary_issues: tuple[str, ...] | None = None
     ontology_classes: tuple[OntologyConcept, ...] = ()
+    characteristic_selection: dict[str, Any] | None = None
 
 @dataclass(frozen=True)
 class ReviewOntology:
@@ -126,7 +129,7 @@ def build_review_frames(
         key: report[key]
         for key in (
             "provider", "requested_model", "model", "prompt_version",
-            "message_id", "ontology_turtle_sha256", "usage",
+            "message_id", "ontology_turtle_sha256", "usage", "context_provenance",
         )
         if key in report
     }
@@ -151,6 +154,17 @@ def build_review_frames(
                 ontology_iris=review_ontology.iris,
                 known_individuals=review_ontology.named_individuals,
             ))
+
+        selection_document = candidate.get(
+            "characteristic_selection"
+        )
+        selection = (
+            CharacteristicSelectionProposal.model_validate(
+                selection_document
+            ).model_dump(mode="json")
+            if selection_document is not None
+            else None
+        )
         frames.append(ReviewFrame(
             analysis_id=analysis_id,
             frame_id=source["frame_id"],
@@ -166,6 +180,7 @@ def build_review_frames(
             ),
             vocabulary_issues=issues,
             ontology_classes=ontology_classes,
+            characteristic_selection=selection,
         ))
 
     return frames
