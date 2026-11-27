@@ -9,7 +9,7 @@ from interpretation.observations import ImageObservation
 from ontology.reader import OntologySource
 
 from .config import MAX_BATCH_SIZE
-from .generation import GenerationStrategy
+from .strategies.base import GenerationStrategy
 from .service import PopulationObservation, populate_batch
 from interpretation.observations import (
     CharacteristicObservation,
@@ -20,7 +20,7 @@ from session_context.graph import (
     context_source_sha256,
 )
 from session_context.models import SessionContext
-
+from .context import record_population_report
 
 def _population_observation(saved: dict) -> PopulationObservation:
     source = saved["observation"]
@@ -144,7 +144,7 @@ def iter_population_reports(
             context=working_context,
             client=client,
         )
-        yield {
+        report: dict[str, Any] = {
             "ontology_source_sha256": ontology_source.source_sha256,
             "provider": provider,
             "requested_model": requested_model,
@@ -154,8 +154,22 @@ def iter_population_reports(
                     "image_path": paths.get(frame["frame_id"]),
                     "image_sha256": frame["observation"]["image_sha256"],
                 }
-                for observation, frame in zip(observations, batch, strict=True)
+                for observation, frame in zip(
+                    observations, batch, strict=True
+                )
             },
             **asdict(result),
         }
+
+        records = record_population_report(
+            working_context,
+            report,
+            ontology_source=ontology_source,
+        )
+        report["characteristic_selection_records"] = {
+            analysis_id: str(record)
+            for analysis_id, record in records.items()
+        }
+
+        yield report
 

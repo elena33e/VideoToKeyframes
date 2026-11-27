@@ -10,16 +10,16 @@ from pydantic import TypeAdapter
 from rdflib import Graph, Literal, Namespace, RDFS, URIRef
 
 from interpretation.config import OBSERVATION_NAMESPACE
-from session_context.characteristic_selection import (
+from session_context.characteristics.selection import (
     CharacteristicSelectionProposal,
     check_selection_proposal,
 )
-from session_context.comparison import characteristics_for_occurrence
+from session_context.characteristics.comparison import characteristics_for_occurrence
 from session_context.graph import entities_for_frame
 from session_context.models import SessionContext
 from interpretation.observations import ImageObservation
-from session_context.identity import AbsoluteIRI
-from .generation import GenerationStrategy
+from session_context.identity.models import AbsoluteIRI
+from .strategies.base import GenerationStrategy
 from .config import MAX_BATCH_SIZE, POPULATION_BASE_IRI
 from .prompting import PROMPT_VERSION, SYSTEM_PROMPT
 

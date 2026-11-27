@@ -12,8 +12,11 @@ from rdflib.term import Node
 
 from interpretation.config import OBSERVATION_NAMESPACE, SESSION_BASE_IRI
 
-from .identity import IdentityDecision, TrackedObject
-from .identity_graph import record_identity_decision
+from .identity.models import (
+    IdentityDecision,
+    TrackedObject,
+)
+from .identity.graph import record_identity_decision
 from .models import SessionContext
 
 

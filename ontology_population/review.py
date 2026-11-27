@@ -16,9 +16,7 @@ import unicodedata
 
 from ontology.catalog import build_ontology_catalog
 from ontology.models import ConceptKind, OntologyConcept
-from session_context.characteristic_selection import (
-    CharacteristicSelectionProposal,
-)
+from session_context.characteristics.selection import CharacteristicSelectionProposal
 
 REVIEW_REPORT_VERSION = 1
 

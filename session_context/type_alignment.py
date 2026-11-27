@@ -53,12 +53,21 @@ class SessionTypeMapper:
             graph.add(triple)
 
         snapshot = replace(source, graph=graph)
+        self._ontology_graph = graph
 
         self._source = str(snapshot.path)
         self._source_sha256 = snapshot.source_sha256
         self._rdf_format = snapshot.rdf_format
         self._aligner = ClassAligner(snapshot)
         self._relations = ClassRelationIndex(snapshot)
+
+    @property
+    def ontology_graph(self) -> Graph:
+        """Returnează o copie a ontologiei folosite de acest mapper."""
+        result = Graph()
+        for triple in self._ontology_graph:
+            result.add(triple)
+        return result
 
     def propose(
         self,

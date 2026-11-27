@@ -40,7 +40,7 @@ from interpretation.config import (
     DEFAULT_DOMAIN_CONTEXT,
 )
 from interpretation.contracts import MAX_GROUP_SIZE
-from gui.ontology_window import OntologyWindow
+from gui.ontology.window import OntologyWindow
 from workflow.jsonld import session_to_jsonld
 
 from rdflib import URIRef
@@ -50,11 +50,12 @@ from session_context.graph import (
     build_session_context,
     context_source_sha256,
 )
-from session_context.identity_criteria import IdentityCriteria
+from session_context.identity.criteria import IdentityCriteria
 from session_context.models import SessionContext
 from session_context.persistence import save_session_context
 from session_context.type_alignment import SessionTypeMapper
-
+from ontology.reader import OntologySource
+from ontology_population.context import record_population_report
 
 STATUS_LABELS = {
     "pending": "Nedescris",
@@ -1932,6 +1933,65 @@ class WorkflowGUI:
             self.identity_window = None
             self._sync_controls()
 
+    def _current_population_context(self) -> SessionContext:
+        """Returnează contextul activ, fără să îl reconstruiască."""
+        if self.session is None:
+            raise ValueError("Nu există o sesiune activă.")
+
+        identity = self.identity_window
+        context = (
+            identity.context
+            if identity is not None and identity.winfo_exists()
+            else self.session_context
+        )
+
+        if context is None:
+            raise ValueError("Contextul sesiunii nu este disponibil.")
+
+        fingerprint = context_source_sha256(
+            session_to_jsonld(self.session)
+        )
+        if (
+            context.session_id != self.session.session_id
+            or context.source_sha256 != fingerprint
+        ):
+            raise ValueError(
+                "Observațiile s-au schimbat. Redeschide popularea "
+                "pentru sesiunea curentă."
+            )
+
+        return context
+
+    def _receive_population_report(
+        self,
+        report: dict,
+        ontology_source: OntologySource,
+    ) -> SessionContext:
+        """Integrează propunerile în contextul folosit acum de GUI."""
+        context = self._current_population_context()
+        previous_size = len(context.dataset)
+
+        record_population_report(
+            context,
+            report,
+            ontology_source=ontology_source,
+        )
+
+        self.session_context = context
+
+        if len(context.dataset) != previous_size:
+            self.session_context_dirty = True
+
+            identity = self.identity_window
+            if (
+                identity is not None
+                and identity.winfo_exists()
+                and identity.context is context
+            ):
+                identity.dirty = True
+
+        return context
+
 
     def _can_open_ontology(self) -> bool:
         return (
@@ -1979,6 +2039,8 @@ class WorkflowGUI:
             dialog,
             session_data=session,
             session_context=context,
+            get_session_context=self._current_population_context,
+            on_population_report=self._receive_population_report,
         )
         window.pack(fill="both", expand=True)
         dialog.protocol("WM_DELETE_WINDOW", window.close)
@@ -2038,6 +2100,21 @@ class WorkflowGUI:
                 "Procesare în desfășurare",
                 "Anulează procesarea și așteaptă finalizarea "
                 "înainte de închidere.",
+                parent=self.root,
+            )
+            return
+
+        population = self.ontology_window
+        if (
+            population is not None
+            and population.winfo_exists()
+            and population.generating
+        ):
+            population.winfo_toplevel().lift()
+            messagebox.showinfo(
+                "Populare în desfășurare",
+                "Așteaptă finalizarea populării sau închide "
+                "fereastra de populare înainte de închiderea aplicației.",
                 parent=self.root,
             )
             return

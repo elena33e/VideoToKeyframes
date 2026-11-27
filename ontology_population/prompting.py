@@ -2,9 +2,7 @@
 
 import json
 
-from session_context.characteristic_selection import (
-    CharacteristicSelectionProposal,
-)
+from session_context.characteristics.selection import CharacteristicSelectionProposal
 
 
 PROMPT_VERSION = "populate-v6-characteristic-selection"
