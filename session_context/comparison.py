@@ -71,7 +71,7 @@ class OccurrenceComparison:
         )
 
 
-def _read_characteristics(
+def characteristics_for_occurrence(
     context: SessionContext,
     occurrence: URIRef,
 ) -> tuple[CharacteristicEvidence, ...]:
@@ -185,8 +185,8 @@ def compare_occurrences(
     if left_iri == right_iri:
         raise ValueError("Compară două apariții distincte.")
 
-    left = _read_characteristics(context, left_iri)
-    right = _read_characteristics(context, right_iri)
+    left = characteristics_for_occurrence(context, left_iri)
+    right = characteristics_for_occurrence(context, right_iri)
 
     comparisons = []
 

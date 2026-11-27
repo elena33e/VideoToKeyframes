@@ -18,6 +18,17 @@ from workflow.models import WorkflowSession
 from workflow.service import create_session_from_images
 
 import httpx
+
+from session_context.graph import (
+    build_session_context,
+    entities_for_frame,
+)
+from session_context.identity import IdentityDecision, TrackedObject
+from session_context.identity_graph import (
+    object_for_occurrence,
+    record_identity_decision,
+)
+
 NAMESPACE = "https://example.test/eggs#"
 ONTOLOGY = """
 @prefix ex: <https://example.test/eggs#> .
@@ -473,6 +484,221 @@ class WorkflowGUITest(unittest.TestCase):
             context.report["source_sha256"],
             source.source_sha256,
         )
+
+    def prepare_identity_session(self):
+        self.import_frames()
+        self.prepare_context()
+
+        entity = {
+            "id": "e1",
+            "name": "element",
+            "characteristics": [{
+                "name": "culoare",
+                "value": "albastru",
+                "uncertain": False,
+            }],
+            "location": "centru",
+            "visibility": "partial",
+            "uncertain": False,
+        }
+
+        with patch.dict(OBSERVATION, {"entities": [entity]}):
+            self.run_description()
+
+    def visit_identity_window(self, visit):
+        with (
+            patch.object(
+                self.root,
+                "wait_window",
+                side_effect=visit,
+            ),
+            patch(
+                "gui.workflow_app.IdentityReviewWindow.wait_visibility"
+            ),
+            patch(
+                "gui.workflow_app.IdentityReviewWindow.grab_set"
+            ),
+            patch(
+                "gui.workflow_app.messagebox.showerror",
+                side_effect=AssertionError(
+                    "Eroare neașteptată la deschiderea reviziei."
+                ),
+            ),
+        ):
+            self.app._open_identity()
+
+    def test_identity_button_requires_completed_frames_and_ontology(self):
+        self.assertEqual(
+            "disabled",
+            str(self.app.identity_button["state"]),
+        )
+
+        self.prepare_identity_session()
+
+        self.assertEqual(
+            "normal",
+            str(self.app.identity_button["state"]),
+        )
+
+        self.app.busy = "description"
+        self.app._sync_controls()
+
+        self.assertEqual(
+            "disabled",
+            str(self.app.identity_button["state"]),
+        )
+
+    def test_identity_context_is_reused_with_accepted_decisions(self):
+        self.prepare_identity_session()
+
+        with patch(
+            "gui.workflow_app.build_session_context",
+            wraps=build_session_context,
+        ) as build:
+            context = self.app._get_identity_context()
+
+            left, right = (
+                entities_for_frame(context, state.frame_id)[0]
+                for state in self.app.session.frames
+            )
+            tracked = TrackedObject(
+                session_id=context.session_id
+            )
+
+            record_identity_decision(
+                context,
+                IdentityDecision(
+                    session_id=context.session_id,
+                    left_occurrence_iri=str(left),
+                    right_occurrence_iri=str(right),
+                    outcome="same_object",
+                    object_id=tracked.object_id,
+                    decided_by="test-user",
+                    justification="Confirmare explicită de test.",
+                ),
+                new_object=tracked,
+            )
+            self.app.session_context_dirty = True
+
+            self.app._select(False)
+            reused = self.app._get_identity_context()
+
+            self.assertEqual(1, build.call_count)
+
+        self.assertIs(context, reused)
+        self.assertEqual(
+            object_for_occurrence(context, left),
+            object_for_occurrence(reused, right),
+        )
+        self.assertTrue(self.app.session_context_dirty)
+
+    def test_regenerated_observations_do_not_silently_replace_dirty_context(self):
+        self.prepare_identity_session()
+        previous = self.app._get_identity_context()
+        self.app.session_context_dirty = True
+
+        self.app.regenerate_var.set(True)
+        self.run_description()
+
+        for answer in (None, True):
+            with (
+                self.subTest(answer=answer),
+                patch(
+                    "gui.workflow_app.messagebox.askyesnocancel",
+                    return_value=answer,
+                ),
+                patch.object(
+                    self.app,
+                    "_save_identity_context",
+                    return_value=False,
+                ),
+            ):
+                self.assertIsNone(
+                    self.app._get_identity_context()
+                )
+                self.assertIs(
+                    previous,
+                    self.app.session_context,
+                )
+                self.assertTrue(
+                    self.app.session_context_dirty
+                )
+
+    def test_identity_window_reopening_preserves_unsaved_evaluation(self):
+        self.prepare_identity_session()
+        contexts = []
+
+        def visit(window):
+            contexts.append(window.context)
+            self.assertTrue(window.evaluate())
+
+            with patch(
+                "gui.identity_review.messagebox.askyesnocancel",
+                return_value=False,
+            ):
+                self.assertTrue(window.close())
+
+        self.visit_identity_window(visit)
+        self.visit_identity_window(visit)
+
+        self.assertIs(contexts[0], contexts[1])
+        self.assertIs(
+            contexts[1],
+            self.app.session_context,
+        )
+        self.assertTrue(self.app.session_context_dirty)
+        self.assertIsNone(self.app.identity_window)
+
+    def test_loaded_context_is_returned_to_main_window(self):
+        self.prepare_identity_session()
+        loaded = []
+        destination = self.folder / "identity_context.trig"
+
+        def visit(window):
+            original = window.context
+            self.assertTrue(window.evaluate())
+
+            with patch(
+                "gui.identity_review.filedialog.asksaveasfilename",
+                return_value=str(destination),
+            ):
+                self.assertTrue(window.save())
+
+            with patch(
+                "gui.identity_review.filedialog.askopenfilename",
+                return_value=str(destination),
+            ):
+                self.assertTrue(window.load())
+
+            self.assertIsNot(original, window.context)
+            loaded.append(window.context)
+            self.assertTrue(window.close())
+
+        self.visit_identity_window(visit)
+
+        self.assertIs(
+            loaded[0],
+            self.app.session_context,
+        )
+        self.assertFalse(self.app.session_context_dirty)
+
+    def test_cancelled_context_save_keeps_main_window_open(self):
+        self.prepare_identity_session()
+        self.app._get_identity_context()
+        self.app.session_context_dirty = True
+
+        with (
+            patch(
+                "gui.workflow_app.messagebox.askyesnocancel",
+                return_value=None,
+            ),
+            patch.object(self.root, "destroy") as destroy,
+        ):
+            self.app._close()
+
+        destroy.assert_not_called()
+
+
 
 
 if __name__ == "__main__":

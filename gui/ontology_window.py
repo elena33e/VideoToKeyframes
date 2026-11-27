@@ -23,6 +23,8 @@ from ontology_population.openai import OpenAIClient
 from ontology_population.review import prepare_review_ontology, build_review_frames
 from ontology_population.session import iter_population_reports
 from ontology.reader import read_ontology_source
+from session_context.graph import snapshot_session_context
+from session_context.models import SessionContext
 
 PROVIDERS = {
     "openai": ("OPENAI", DEFAULT_OPENAI_MODEL, OpenAIClient),
@@ -36,6 +38,7 @@ class OntologyWindow(ttk.Frame):
             parent: tk.Misc,
             *,
             session_data: dict[str, Any] | None = None,
+            session_context: SessionContext | None = None,
     ) -> None:
         super().__init__(parent, padding=12)
         self.session_data = session_data
@@ -51,6 +54,7 @@ class OntologyWindow(ttk.Frame):
         self.review: OntologyReview | None = None
         self.received_groups = 0
         self.received = 0
+        self.session_context = session_context
 
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True)
@@ -127,9 +131,19 @@ class OntologyWindow(ttk.Frame):
             self.status.set("Completează modelul.")
             return
 
+        context_snapshot = (
+            snapshot_session_context(self.session_context)
+            if self.session_context is not None
+            else None
+        )
+
         args = (
-            source, self.ontology_path.get().strip(),
-            self.provider.get(), model, int(self.batch_size.get()),
+            source,
+            self.ontology_path.get().strip(),
+            self.provider.get(),
+            model,
+            int(self.batch_size.get()),
+            context_snapshot,
         )
         self.received = 0
         self.received_groups = 0
@@ -145,6 +159,7 @@ class OntologyWindow(ttk.Frame):
             provider: str,
             model: str,
             batch_size: int,
+            context: SessionContext | None = None,
     ) -> None:
         try:
             session = (
@@ -174,6 +189,7 @@ class OntologyWindow(ttk.Frame):
                 session, ontology_source=ontology_source,
                 client=client, provider=provider, requested_model=model,
                 batch_size=batch_size,
+                context=context,
             )
             while not self.stop.is_set():
                 report = next(reports, None)

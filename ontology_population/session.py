@@ -15,6 +15,12 @@ from interpretation.observations import (
     CharacteristicObservation,
     ImageObservation,
 )
+from session_context.graph import (
+    build_session_context,
+    context_source_sha256,
+)
+from session_context.models import SessionContext
+
 
 def _population_observation(saved: dict) -> PopulationObservation:
     source = saved["observation"]
@@ -64,6 +70,19 @@ def _population_observation(saved: dict) -> PopulationObservation:
     return PopulationObservation(
         analysis_id=saved["analysis_id"],
         observation=observation.model_dump(mode="json"),
+        occurrence_iris_by_source_id={
+            ids[entity["id"]]: entity["id"]
+            for entity in source["entities"]
+        },
+        characteristic_iris_by_source_id={
+            ids[entity["id"]]: tuple(
+                characteristic["id"]
+                for characteristic in entity.get(
+                    "characteristics", []
+                )
+            )
+            for entity in source["entities"]
+        },
     )
 
 def iter_population_reports(
@@ -75,6 +94,7 @@ def iter_population_reports(
     requested_model: str,
     batch_size: int = MAX_BATCH_SIZE,
     offset: int = 0,
+    context: SessionContext | None = None,
 ) -> Iterator[dict[str, Any]]:
     if not 1 <= batch_size <= MAX_BATCH_SIZE:
         raise ValueError(f"Grupul trebuie să aibă între 1 și {MAX_BATCH_SIZE} cadre.")
@@ -94,6 +114,21 @@ def iter_population_reports(
     if len(analysis_ids) != len(set(analysis_ids)):
         raise ValueError("Sesiunea conține ID-uri de analiză duplicate.")
 
+    working_context = (
+        context
+        if context is not None
+        else build_session_context(session)
+    )
+
+    if (
+        working_context.session_id != session["session_id"]
+        or working_context.source_sha256
+        != context_source_sha256(session)
+    ):
+        raise ValueError(
+            "Contextul nu corespunde observațiilor sesiunii."
+        )
+
     ontology_turtle = ontology_source.graph.serialize(format="turtle")
     paths = {
         frame["frame_id"]: frame["image_path"]
@@ -103,7 +138,12 @@ def iter_population_reports(
     for start in range(0, len(selected), batch_size):
         batch = selected[start:start + batch_size]
         observations = [_population_observation(frame["observation"]) for frame in batch]
-        result = populate_batch(observations, ontology_turtle=ontology_turtle, client=client)
+        result = populate_batch(
+            observations,
+            ontology_turtle=ontology_turtle,
+            context=working_context,
+            client=client,
+        )
         yield {
             "ontology_source_sha256": ontology_source.source_sha256,
             "provider": provider,
