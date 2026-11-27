@@ -48,6 +48,7 @@ def save_review_report(
             "entity_iris_by_source_id": frame.entity_iris_by_source_id,
             "population_provenance": frame.population_provenance,
             "characteristic_selection": frame.characteristic_selection,
+            "identity_analysis": frame.identity_analysis,
         }
 
     revision_id = uuid4().hex

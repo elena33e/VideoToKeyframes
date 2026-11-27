@@ -19,6 +19,10 @@ from session_context.graph import entities_for_frame
 from session_context.models import SessionContext
 from interpretation.observations import ImageObservation
 from session_context.identity.models import AbsoluteIRI
+from session_context.identity.analysis import (
+    IdentityAnalysisProposal,
+    check_identity_analysis_proposal,
+)
 from .strategies.base import GenerationStrategy
 from .config import MAX_BATCH_SIZE, POPULATION_BASE_IRI
 from .prompting import PROMPT_VERSION, SYSTEM_PROMPT
@@ -42,7 +46,18 @@ class PopulationGraph:
     jsonld: dict[str, Any]
     entity_iris_by_source_id: dict[str, str]
     characteristic_selection: dict[str, Any] | None = None
+    identity_analysis: dict[str, Any] | None = None
 
+@dataclass(frozen=True)
+class PopulationResponse:
+    """Componente verificate structural și față de surse.
+
+    Aceste verificări nu constituie acceptare semantică.
+    """
+
+    graphs: dict[str, dict[str, Any]]
+    characteristic_selection: CharacteristicSelectionProposal
+    identity_analysis: IdentityAnalysisProposal
 
 @dataclass(frozen=True)
 class PopulationBatchResult:
@@ -317,10 +332,7 @@ def _read_population_response(
     expected_occurrences: set[str],
     context: SessionContext,
     ontology: Graph,
-) -> tuple[
-    dict[str, dict[str, Any]],
-    CharacteristicSelectionProposal,
-]:
+) -> PopulationResponse:
     try:
         document = json.loads(
             text,
@@ -330,12 +342,15 @@ def _read_population_response(
 
         if (
             not isinstance(document, dict)
-            or set(document)
-            != {"graphs", "characteristic_selection"}
+            or set(document) != {
+                "graphs",
+                "characteristic_selection",
+                "identity_analysis",
+            }
         ):
             raise PopulationError(
-                "Răspunsul trebuie să conțină exact graphs "
-                "și characteristic_selection."
+                "Răspunsul trebuie să conțină exact graphs, "
+                "characteristic_selection și identity_analysis."
             )
 
         graphs = _read_graphs(
@@ -347,11 +362,19 @@ def _read_population_response(
             expected_graphs,
         )
 
-        selection = CharacteristicSelectionProposal.model_validate(
-            document["characteristic_selection"]
+        selection = check_selection_proposal(
+            CharacteristicSelectionProposal.model_validate(
+                document["characteristic_selection"]
+            ),
+            context=context,
+            expected_occurrences=expected_occurrences,
+            ontology=ontology,
         )
-        check_selection_proposal(
-            selection,
+
+        identity_analysis = check_identity_analysis_proposal(
+            IdentityAnalysisProposal.model_validate(
+                document["identity_analysis"]
+            ),
             context=context,
             expected_occurrences=expected_occurrences,
             ontology=ontology,
@@ -362,7 +385,11 @@ def _read_population_response(
             f"Răspuns de interpretare nevalid: {exc}"
         ) from exc
 
-    return graphs, selection
+    return PopulationResponse(
+        graphs=graphs,
+        characteristic_selection=selection,
+        identity_analysis=identity_analysis,
+    )
 
 
 def populate_batch(
@@ -468,7 +495,7 @@ def populate_batch(
         ].values()
     }
 
-    documents, selection = _read_population_response(
+    parsed = _read_population_response(
         response.text,
         expected_graphs={
             entry["graph_iri"]
@@ -481,18 +508,34 @@ def populate_batch(
 
     selections_by_occurrence = {
         appearance.occurrence_iri: appearance
-        for appearance in selection.appearances
+        for appearance in parsed.characteristic_selection.appearances
+    }
+    analyses_by_occurrence = {
+        appearance.occurrence_iri: appearance
+        for appearance in parsed.identity_analysis.appearances
     }
 
     return PopulationBatchResult(
         graphs={
             entry["analysis_id"]: PopulationGraph(
-                jsonld=documents[entry["graph_iri"]],
+                jsonld=parsed.graphs[entry["graph_iri"]],
                 entity_iris_by_source_id=entry["entity_iris_by_source_id"],
                 characteristic_selection=(
                     CharacteristicSelectionProposal(
                         appearances=tuple(
                             selections_by_occurrence[
+                                reference["occurrence_iri"]
+                            ]
+                            for reference in entry[
+                                "source_references_by_source_id"
+                            ].values()
+                        ),
+                    ).model_dump(mode="json")
+                ),
+                identity_analysis=(
+                    IdentityAnalysisProposal(
+                        appearances=tuple(
+                            analyses_by_occurrence[
                                 reference["occurrence_iri"]
                             ]
                             for reference in entry[

@@ -19,7 +19,18 @@ from session_context.characteristics.graph import (
     read_characteristic_selection,
 )
 from session_context.graph import build_session_context
+from rdflib import Graph, Literal, URIRef
 
+from session_context.identity.analysis import IdentityAnalysisProposal
+from session_context.identity.analysis_graph import (
+    CTX,
+    read_identity_analysis,
+    read_identity_analyses,
+)
+from session_context.persistence import (
+    load_session_context,
+    save_session_context,
+)
 
 class PopulationContextTest(unittest.TestCase):
     def setUp(self):
@@ -143,6 +154,7 @@ class PopulationContextTest(unittest.TestCase):
         report = deepcopy(self.report)
         for candidate in report["graphs"].values():
             candidate.pop("characteristic_selection")
+            candidate.pop("identity_analysis")
 
         before = self.quads()
         self.assertEqual({}, self.record(report))
@@ -195,6 +207,150 @@ class PopulationContextTest(unittest.TestCase):
             self.assertEqual("proposal", data.proposal.status)
 
         self.assertEqual(observations, set(self.context.observations))
+
+    def test_records_identity_analysis_with_sources_and_provenance(self):
+        observations = set(self.context.observations)
+        identities = set(self.context.identities)
+
+        self.record()
+
+        records, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+
+        self.assertEqual({}, issues)
+        self.assertEqual(2, len(records))
+        self.assertEqual(
+            set(self.report["graphs"]),
+            {
+                data.provenance.analysis_id
+                for data in records.values()
+            },
+        )
+
+        for data in records.values():
+            analysis_id = data.provenance.analysis_id
+            candidate = self.report["graphs"][analysis_id]
+            expected = IdentityAnalysisProposal.model_validate(
+                candidate["identity_analysis"]
+            )
+
+            self.assertEqual(expected, data.proposal)
+            self.assertEqual("proposal", data.proposal.status)
+            self.assertEqual(
+                candidate["jsonld"]["@id"],
+                data.provenance.population_graph_iri,
+            )
+            self.assertEqual(
+                self.report["context_provenance"][
+                    "identities_turtle_sha256"
+                ],
+                data.provenance.identities_turtle_sha256,
+            )
+
+        self.assertEqual(
+            observations, set(self.context.observations)
+        )
+        self.assertEqual(
+            identities, set(self.context.identities)
+        )
+        self.assertEqual(1, self.base.client.generate.call_count)
+
+    def test_invalid_second_identity_analysis_prevents_whole_import(self):
+        report = deepcopy(self.report)
+        second = list(report["graphs"].values())[1]
+        second["identity_analysis"]["appearances"].pop()
+        before = self.quads()
+
+        with self.assertRaises(ValueError):
+            self.record(report)
+
+        self.assertEqual(before, self.quads())
+
+    def test_identity_analysis_can_be_imported_without_selection(self):
+        report = deepcopy(self.report)
+        for candidate in report["graphs"].values():
+            candidate.pop("characteristic_selection")
+
+        self.assertEqual({}, self.record(report))
+
+        records, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+        self.assertEqual({}, issues)
+        self.assertEqual(2, len(records))
+
+    def test_identity_analyses_survive_context_save_and_reload(self):
+        self.record()
+        expected, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+        self.assertEqual({}, issues)
+
+        path = self.folder / "context.trig"
+        save_session_context(self.context, path)
+        restored = load_session_context(path)
+
+        actual, issues = read_identity_analyses(
+            restored,
+            ontology=self.ontology.graph,
+        )
+
+        self.assertEqual({}, issues)
+        self.assertEqual(expected, actual)
+
+    def test_changed_ontology_invalidates_identity_analysis_on_read(self):
+        self.record()
+        records, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+        self.assertEqual({}, issues)
+        record = next(iter(records))
+
+        changed = Graph()
+        for triple in self.ontology.graph:
+            changed.add(triple)
+        changed.add((
+            URIRef("urn:test:additional-subject"),
+            URIRef("urn:test:additional-property"),
+            Literal("Informație ontologică suplimentară."),
+        ))
+
+        with self.assertRaises(ValueError):
+            read_identity_analysis(
+                self.context,
+                record,
+                ontology=changed,
+            )
+
+    def test_bad_identity_record_does_not_hide_valid_records(self):
+        self.record()
+        records, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+        self.assertEqual({}, issues)
+
+        bad = next(iter(records))
+        self.context.dataset.graph(bad).set((
+            bad,
+            CTX.analysisStatus,
+            Literal("accepted"),
+        ))
+        before = self.quads()
+
+        valid, issues = read_identity_analyses(
+            self.context,
+            ontology=self.ontology.graph,
+        )
+
+        self.assertEqual(set(records) - {bad}, set(valid))
+        self.assertEqual({bad}, set(issues))
+        self.assertEqual(before, self.quads())
 
 
 if __name__ == "__main__":

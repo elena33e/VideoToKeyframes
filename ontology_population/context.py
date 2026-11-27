@@ -8,7 +8,6 @@ from rdflib import Literal, URIRef
 from ontology.reader import OntologySource
 from session_context.characteristics.graph import (
     CTX,
-    SelectionProvenance,
     record_characteristic_selection,
 )
 from session_context.characteristics.selection import (
@@ -16,6 +15,11 @@ from session_context.characteristics.selection import (
 )
 from session_context.graph import snapshot_session_context
 from session_context.models import SessionContext
+from session_context.identity.analysis import IdentityAnalysisProposal
+from session_context.identity.analysis_graph import (
+    record_identity_analysis,
+)
+from session_context.population_provenance import PopulationProvenance
 
 
 def _mapping(value: Any, label: str) -> Mapping:
@@ -30,19 +34,25 @@ def record_population_report(
     *,
     ontology_source: OntologySource,
 ) -> dict[str, URIRef]:
-    """Verifică grupul și înregistrează selecțiile sale.
+    """Verifică grupul și păstrează propunerile sale în context.
 
-    Returnează identificatorul înregistrării pentru fiecare analiză.
-    Rapoartele vechi fără selecție nu creează înregistrări.
+    Returnează identificatorii selecțiilor caracteristicilor, pentru
+    compatibilitate cu apelanții existenți. Analizele identității
+    pot fi enumerate prin read_identity_analyses().
 
+    Rapoartele vechi fără propuneri nu creează înregistrări.
     Funcția trebuie apelată fără modificări concurente ale contextului.
     """
     records: dict[str, URIRef] = {}
+    prepared_records: set[URIRef] = set()
 
     try:
         report = _mapping(report, "Raportul")
 
-        if report["ontology_source_sha256"] != ontology_source.source_sha256:
+        if (
+            report["ontology_source_sha256"]
+            != ontology_source.source_sha256
+        ):
             raise ValueError(
                 "Ontologia raportului diferă de sursa încărcată."
             )
@@ -51,10 +61,18 @@ def record_population_report(
             "session_id" in report
             and report["session_id"] != context.session_id
         ):
-            raise ValueError("Raportul aparține altei sesiuni.")
+            raise ValueError(
+                "Raportul aparține altei sesiuni."
+            )
 
-        sources = _mapping(report["sources"], "Sursele raportului")
-        graphs = _mapping(report["graphs"], "Grafurile raportului")
+        sources = _mapping(
+            report["sources"],
+            "Sursele raportului",
+        )
+        graphs = _mapping(
+            report["graphs"],
+            "Grafurile raportului",
+        )
 
         if sources.keys() != graphs.keys():
             raise ValueError(
@@ -64,17 +82,27 @@ def record_population_report(
         prepared = snapshot_session_context(context)
 
         for analysis_id, candidate in graphs.items():
-            candidate = _mapping(candidate, "Rezultatul unei analize")
+            candidate = _mapping(
+                candidate,
+                "Rezultatul unei analize",
+            )
             selection_document = candidate.get(
                 "characteristic_selection"
             )
+            identity_document = candidate.get(
+                "identity_analysis"
+            )
 
-            # Compatibilitate cu rapoartele anterioare selecției.
-            if selection_document is None:
+            # Rapoartele vechi pot să nu conțină aceste propuneri.
+            if (
+                selection_document is None
+                and identity_document is None
+            ):
                 continue
 
             source = _mapping(
-                sources[analysis_id], "Sursa unei analize"
+                sources[analysis_id],
+                "Sursa unei analize",
             )
             metadata = _mapping(
                 candidate.get("population_provenance", report),
@@ -85,10 +113,11 @@ def record_population_report(
                 "Proveniența contextului",
             )
             document = _mapping(
-                candidate["jsonld"], "Graful candidat"
+                candidate["jsonld"],
+                "Graful candidat",
             )
 
-            provenance = SelectionProvenance(
+            provenance = PopulationProvenance(
                 session_id=context_metadata["session_id"],
                 observations_sha256=(
                     context_metadata["observations_sha256"]
@@ -111,15 +140,20 @@ def record_population_report(
                 ),
             )
 
-            frame = prepared.frame_iris.get(provenance.frame_id)
+            frame = prepared.frame_iris.get(
+                provenance.frame_id
+            )
             if frame is None:
                 raise ValueError(
                     "Cadrul raportului nu există în context."
                 )
 
-            analyses = set(prepared.observations.objects(
-                frame, CTX.observation
-            ))
+            analyses = set(
+                prepared.observations.objects(
+                    frame,
+                    CTX.observation,
+                )
+            )
             if len(analyses) != 1:
                 raise ValueError(
                     "Cadrul trebuie să aibă o singură analiză."
@@ -128,32 +162,54 @@ def record_population_report(
             analysis = next(iter(analyses))
             if (
                 not isinstance(analysis, URIRef)
-                or set(prepared.observations.objects(
-                    analysis, CTX.imageSha256
-                )) != {Literal(source["image_sha256"])}
+                or set(
+                    prepared.observations.objects(
+                        analysis,
+                        CTX.imageSha256,
+                    )
+                ) != {Literal(source["image_sha256"])}
             ):
                 raise ValueError(
                     "Imaginea sursă nu corespunde contextului."
                 )
 
-            proposal = CharacteristicSelectionProposal.model_validate(
-                selection_document
-            )
-            records[analysis_id] = record_characteristic_selection(
-                prepared,
-                proposal,
-                provenance=provenance,
-                ontology=ontology_source.graph,
-            )
+            if selection_document is not None:
+                proposal = (
+                    CharacteristicSelectionProposal.model_validate(
+                        selection_document
+                    )
+                )
+                record = record_characteristic_selection(
+                    prepared,
+                    proposal,
+                    provenance=provenance,
+                    ontology=ontology_source.graph,
+                )
+                records[analysis_id] = record
+                prepared_records.add(record)
+
+            if identity_document is not None:
+                identity_proposal = (
+                    IdentityAnalysisProposal.model_validate(
+                        identity_document
+                    )
+                )
+                record = record_identity_analysis(
+                    prepared,
+                    identity_proposal,
+                    provenance=provenance,
+                    ontology=ontology_source.graph,
+                )
+                prepared_records.add(record)
 
     except (KeyError, TypeError) as exc:
         raise ValueError(
             "Raportul nu conține toate datele necesare "
-            "înregistrării selecției."
+            "înregistrării propunerilor."
         ) from exc
 
-    # Ajungem aici numai după verificarea întregului grup.
-    for record in records.values():
+    # Transferăm propunerile numai după verificarea întregului grup.
+    for record in sorted(prepared_records, key=str):
         target = context.dataset.graph(record)
         for triple in prepared.dataset.graph(record):
             target.add(triple)

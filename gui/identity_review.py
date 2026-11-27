@@ -47,6 +47,7 @@ from session_context.identity.assessment import (
 from session_context.models import SessionContext
 from session_context.persistence import load_session_context, save_session_context
 from gui.characteristic_review import CharacteristicProposalView
+from gui.proposed_comparison_view import ProposedComparisonView
 
 CTX = Namespace(OBSERVATION_NAMESPACE)
 ACTIONS = {
@@ -243,13 +244,38 @@ class IdentityReviewWindow(tk.Toplevel):
                 strict=True,
             )),
         )
+
         self.characteristic_proposals.pack(
             fill="both", expand=True
         )
 
+        proposed_comparison = ttk.Frame(tabs, padding=8)
+        tabs.add(proposed_comparison, text="Comparație propusă")
+
+        self.proposed_characteristic_comparison = ProposedComparisonView(
+            proposed_comparison,
+            get_context=lambda: self.context,
+            get_frame_pair=lambda: (
+                self.frame_ids[self.reference.current()],
+                self.frame_ids[self.current.current()],
+            ),
+            ontology=self.mapper.ontology_graph,
+            frame_labels=dict(zip(
+                self.frame_ids,
+                self.frame_labels,
+                strict=True,
+            )),
+        )
+        self.proposed_characteristic_comparison.pack(
+            fill="both", expand=True
+        )
+
         def refresh_proposals(_event=None):
-            if tabs.select() == str(proposals):
+            selected_tab = tabs.select()
+            if selected_tab == str(proposals):
                 self.characteristic_proposals.refresh()
+            elif selected_tab == str(proposed_comparison):
+                self.proposed_characteristic_comparison.refresh()
 
         tabs.bind("<<NotebookTabChanged>>", refresh_proposals)
 
@@ -370,6 +396,7 @@ class IdentityReviewWindow(tk.Toplevel):
         for button in self.decision_buttons.values():
             button.configure(state="disabled")
         self.status.set("Evaluează din nou după alegerea cadrelor.")
+        self.proposed_characteristic_comparison.refresh()
 
     def _label(self, occurrence):
         value = self.context.observations.value(occurrence, RDFS.label, any=False)

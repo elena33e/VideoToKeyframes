@@ -112,6 +112,7 @@ class PopulationSourcesTest(unittest.TestCase):
         self.requests.append(payload)
 
         appearances = []
+        identity_appearances = []
 
         for entry in payload["observations"]:
             for entity in entry["observation"]["entities"]:
@@ -144,6 +145,27 @@ class PopulationSourcesTest(unittest.TestCase):
                     "characteristics": characteristics,
                 })
 
+                identity_appearances.append({
+                    "occurrence_iri": reference["occurrence_iri"],
+                    "entity_kind": None,
+                    "entity_kind_reason": (
+                        "Natura entității nu este evaluată "
+                        "de acest răspuns simulat."
+                    ),
+                    "tracking_unit": (
+                        "Entitatea indicată de apariția sursă."
+                    ),
+                    "granularity": "Granularitate neclarificată.",
+                    "ontology_reference_iris": [],
+                    "identity_conditions": [],
+                    "compatible_changes": [],
+                    "identity_boundaries": [],
+                    "unresolved_questions": [
+                        "Criteriul de identitate nu este stabilit."
+                    ],
+                    "uncertain": True,
+                })
+
         document = {
             "graphs": {
                 "@graph": [
@@ -157,6 +179,10 @@ class PopulationSourcesTest(unittest.TestCase):
             "characteristic_selection": {
                 "status": "proposal",
                 "appearances": appearances,
+            },
+            "identity_analysis": {
+                "status": "proposal",
+                "appearances": identity_appearances,
             },
         }
 

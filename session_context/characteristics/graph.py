@@ -2,17 +2,9 @@
 
 import json
 from hashlib import sha256
-from typing import (
-    Annotated,
-    Literal as LiteralType,
-)
+from typing import Literal as LiteralType
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    StrictStr,
-    StringConstraints,
-)
+from pydantic import BaseModel, ConfigDict
 from rdflib import (
     Graph,
     Literal,
@@ -32,39 +24,13 @@ from .selection import (
 from ..graph import entities_for_frame
 from ..identity.models import AbsoluteIRI
 from ..models import SessionContext
+from ..population_provenance import (
+    PopulationProvenance as SelectionProvenance,
+)
 
 
 CTX = Namespace(OBSERVATION_NAMESPACE)
 FORMAT_VERSION = "characteristic-selection-v1"
-
-Sha256 = Annotated[
-    str,
-    StringConstraints(
-        strict=True,
-        pattern=r"^[0-9a-f]{64}$",
-    ),
-]
-
-
-class SelectionProvenance(BaseModel):
-    """Sursele rezultatului, preluate din raportul de populare."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    session_id: Text
-    observations_sha256: Sha256
-    observations_turtle_sha256: Sha256
-    identities_turtle_sha256: Sha256
-
-    frame_id: Text
-    analysis_id: Text
-    population_graph_iri: AbsoluteIRI
-
-    provider: Text
-    model: Text
-    prompt_version: Text
-    message_id: StrictStr
-    ontology_turtle_sha256: Sha256
 
 
 class CharacteristicSelectionRecord(BaseModel):
